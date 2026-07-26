@@ -40,13 +40,13 @@ USA: https://www.adafruit.com/product/302
 ## OTA Firmware Update
 OTA updates are enabled.  
 Use the deviceID as the upload hostname.  
-Default OTA password: companion-satellite
+ArduinoOTA password: companion-satellite. Browser updates are open by default and can be protected with an owner-selected password.
 
 ### Browser update (recommended)
 
 1. Download `M5-AtomMatrix-Companion-v4-Satellite.ino.bin` from a GitHub release.
 2. Browse to `http://<device-ip>:9999/update` on the same Wi-Fi network.
-3. Sign in with username `admin` and password `companion-satellite`.
+3. Updates are open by default. Use the optional protection form on that page to set a password; once set, sign in as `admin` with that password.
 4. Select the `.bin` and wait for the automatic reboot. Never remove power while the upload is in progress.
 
 The AtomMatrix release uses the **Minimal SPIFFS (Large APPs with OTA)** partition scheme; keep that partition scheme when building firmware. Only the release application `.bin` can be installed through the browser.
