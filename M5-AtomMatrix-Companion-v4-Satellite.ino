@@ -26,6 +26,7 @@
 #include <WiFiManager.h>
 #include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <Update.h>
 #include <vector>
 #include <esp32-hal-ledc.h>   // core 3.x LEDC helpers
 #include <WebServer.h>
@@ -856,6 +857,35 @@ void handlePostConfig() {
   }
 }
 
+const char* firmwareUpdateUser = "admin";
+const char* firmwareUpdatePassword = "companion-satellite";
+
+bool requireFirmwareUpdateAuth() {
+  if (restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword)) return true;
+  restServer.requestAuthentication();
+  return false;
+}
+
+void handleFirmwareUpdatePage() {
+  if (!requireFirmwareUpdateAuth()) return;
+  restServer.send(200, "text/html", "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><h2>Firmware update</h2><p>Select the release application <code>.bin</code> file. Do not power off while updating.</p><form method=POST action=/update enctype=multipart/form-data><input type=file name=firmware accept='.bin' required><button type=submit>Install and reboot</button></form>");
+}
+
+void handleFirmwareUpload() {
+  if (!restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword)) return;
+  HTTPUpload& upload = restServer.upload();
+  if (upload.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
+  else if (upload.status == UPLOAD_FILE_WRITE) Update.write(upload.buf, upload.currentSize);
+  else if (upload.status == UPLOAD_FILE_END) Update.end(true);
+}
+
+void handleFirmwareUpdateResult() {
+  if (!requireFirmwareUpdateAuth()) return;
+  const bool success = !Update.hasError();
+  restServer.send(success ? 200 : 500, "text/plain", success ? "Update complete. Rebooting..." : "Firmware update failed.");
+  if (success) { delay(500); ESP.restart(); }
+}
+
 void setupRestServer() {
   restServer.on("/api/host", HTTP_GET, handleGetHost);
   restServer.on("/api/port", HTTP_GET, handleGetPort);
@@ -864,6 +894,8 @@ void setupRestServer() {
   restServer.on("/api/host", HTTP_POST, handlePostHost);
   restServer.on("/api/port", HTTP_POST, handlePostPort);
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
+  restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
+  restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
   
   restServer.begin();
   Serial.println("[REST] REST API server started on port 9999");
