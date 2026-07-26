@@ -72,6 +72,15 @@ const unsigned long pingIntervalMs  = 2000;
 // Brightness (0–100)
 int brightness = 100;
 
+// The Atom Matrix is 25 WS2812C LEDs driven from the Atom's small power
+// supply.  Keep the colour data itself at 20% as a second, hardware-level
+// safeguard: Companion can send full-white (255,255,255), which otherwise
+// makes the whole panel uncomfortably bright and hot.
+//
+// This is deliberately separate from `brightness`, which is the Companion
+// control value and also drives the external tally LED.
+const uint8_t MATRIX_OUTPUT_SCALE_PERCENT = 20;
+
 // -------------------------------------------------------------------
 // External RGB LED (Jaycar RGB LED)  - ATOM MATRIX PINS
 // -------------------------------------------------------------------
@@ -342,11 +351,26 @@ void logger(const String& s, const String& type = "info") {
 // -------------------------------------------------------------------
 // Matrix drawing helpers (Tally-Arbiter style)
 // -------------------------------------------------------------------
+int scaleMatrixColor(int rgb) {
+  const uint8_t r = ((rgb >> 16) & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  const uint8_t g = ((rgb >> 8)  & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  const uint8_t b = (rgb & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  return (r << 16) | (g << 8) | b;
+}
+
+void matrixDrawPixel(uint8_t pixel, int rgb) {
+  M5.dis.drawpix(pixel, scaleMatrixColor(rgb));
+}
+
+void matrixFill(int rgb) {
+  M5.dis.fillpix(scaleMatrixColor(rgb));
+}
+
 void drawNumberArray(int arr[25], int colors[2]) {
   for (int i = 0; i < 25; i++) {
     int colorIndex = arr[i];  // 0 or 1
     int rgb        = colors[colorIndex];
-    M5.dis.drawpix(i, rgb);
+    matrixDrawPixel(i, rgb);
   }
 }
 
@@ -359,7 +383,7 @@ void drawMultiple(int arr[25], int colors[2], int times, int delaysMs) {
 
 // Clear Matrix with black
 void matrixOff() {
-  M5.dis.fillpix(0x000000);
+  matrixFill(0x000000);
 }
 
 int matrixStatusColor() {
@@ -373,8 +397,8 @@ int matrixStatusColor() {
 }
 
 void renderMatrixStatus() {
-  if (!tallyActive) M5.dis.fillpix(RGB_COLOR_BLACK);
-  M5.dis.drawpix(0, matrixStatusColor());
+  if (!tallyActive) matrixFill(RGB_COLOR_BLACK);
+  matrixDrawPixel(0, matrixStatusColor());
 }
 
 void setMatrixStatus(uint8_t status) {
@@ -504,7 +528,7 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
 
   // Light the matrix in the tally colour, with one status pixel overlaid.
   int rgb = (scaledR << 16) | (scaledG << 8) | scaledB;
-  M5.dis.fillpix(rgb);
+  matrixFill(rgb);
   tallyActive = (r != 0 || g != 0 || b != 0);
   renderMatrixStatus();
 }
@@ -627,6 +651,29 @@ void handleGetConfig() {
   Serial.println("[REST] Response JSON: " + json);
   restServer.send(200, "application/json", json);
   Serial.println("[REST] GET /api/config: " + json);
+}
+
+String jsonSetting(const String& body, const char* name) {
+  const String key = String("\"") + name + "\"";
+  int pos = body.indexOf(key); if (pos < 0) return "";
+  pos = body.indexOf(':', pos + key.length()); if (pos < 0) return "";
+  pos++; while (pos < body.length() && isspace(body[pos])) pos++;
+  if (pos < body.length() && body[pos] == '\"') { const int end = body.indexOf('\"', ++pos); return end < 0 ? "" : body.substring(pos, end); }
+  int end = pos; while (end < body.length() && body[end] != ',' && body[end] != '}') end++;
+  String value = body.substring(pos, end); value.trim(); return value;
+}
+
+void handleGetSettings() {
+  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + "}");
+}
+
+void handlePostSettings() {
+  const String value = jsonSetting(restServer.arg("plain"), "brightness");
+  if (!value.length() || value.toInt() < 0 || value.toInt() > 100) { restServer.send(400, "text/plain", "brightness must be 0-100"); return; }
+  brightness = value.toInt();
+  preferences.begin("companion", false); preferences.putInt("brightness", brightness); preferences.end();
+  setExternalLedColor(lastColorR, lastColorG, lastColorB);
+  restServer.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handlePostHost() {
@@ -898,10 +945,12 @@ void setupRestServer() {
   restServer.on("/api/host", HTTP_GET, handleGetHost);
   restServer.on("/api/port", HTTP_GET, handleGetPort);
   restServer.on("/api/config", HTTP_GET, handleGetConfig);
+  restServer.on("/api/settings", HTTP_GET, handleGetSettings);
   
   restServer.on("/api/host", HTTP_POST, handlePostHost);
   restServer.on("/api/port", HTTP_POST, handlePostPort);
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
+  restServer.on("/api/settings", HTTP_POST, handlePostSettings);
   restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
   restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
   restServer.on("/update/password", HTTP_POST, handleFirmwareUpdatePassword);
@@ -1055,6 +1104,7 @@ void setup() {
 
   if (preferences.getString("companionport").length() > 0)
     preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
+  brightness = preferences.getInt("brightness", 100);
   firmwareUpdatePassword = preferences.getString("updatepassword", "");
   preferences.end();
 
@@ -1069,7 +1119,7 @@ void setup() {
   // Init M5 Atom
   M5.begin(true, false, true);
   delay(50);
-  M5.dis.setBrightness(32);  // nice low-ish brightness for both test + runtime
+  M5.dis.setBrightness(20);  // M5Stack's recommended safe Atom Matrix level
   matrixOff();
 
   // Boot icon (simple “setup” sequence)
