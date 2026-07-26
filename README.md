@@ -42,6 +42,19 @@ OTA updates are enabled.
 Use the deviceID as the upload hostname.  
 Default OTA password: companion-satellite
 
+### Browser update (recommended)
+
+1. Download `M5-AtomMatrix-Companion-v4-Satellite.ino.bin` from a GitHub release.
+2. Browse to `http://<device-ip>:9999/update` on the same Wi-Fi network.
+3. Sign in with username `admin` and password `companion-satellite`.
+4. Select the `.bin` and wait for the automatic reboot. Never remove power while the upload is in progress.
+
+The AtomMatrix release uses the **Minimal SPIFFS (Large APPs with OTA)** partition scheme; keep that partition scheme when building firmware. Only the release application `.bin` can be installed through the browser.
+
+### 5x5 status indicator
+
+The top-left matrix pixel remains a connection indicator while the rest of the panel shows the Companion tally colour: blue = waiting/connecting, green = connected, orange = Wi-Fi setup, red = error.
+
 ## Troubleshooting
 Matrix LEDs blank: confirm Companion is sending COLOR or BITMAP data.  
 External LED not working: verify wiring and that the LED is common-cathode.  
