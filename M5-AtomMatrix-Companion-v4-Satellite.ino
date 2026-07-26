@@ -22,22 +22,32 @@
 */
 
 #include <M5Atom.h>
+#ifdef ATOMIC_POE_BUILD
+#include <SPI.h>
+#include <M5_Ethernet.h>
+#include <esp_mac.h>
+#include "PoeWebServer.h"
+#else
 #include <WiFi.h>
 #include <WiFiManager.h>
-#include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#endif
+#include <Preferences.h>
 #include <Update.h>
 #include <vector>
 #include <esp32-hal-ledc.h>   // core 3.x LEDC helpers
-#include <WebServer.h>
-#include <ESPmDNS.h>
 
 Preferences preferences;
+#ifdef ATOMIC_POE_BUILD
+EthernetClient client;
+PoeWebServer restServer(9999);
+#else
 WiFiManager wifiManager;
 WiFiClient client;
-
-// REST API Server for Companion configuration
 WebServer restServer(9999);
+#endif
 
 // -------------------------------------------------------------------
 // Companion Server
@@ -72,13 +82,13 @@ const unsigned long pingIntervalMs  = 2000;
 // Brightness (0–100)
 int brightness = 100;
 
-// The Atom Matrix is 25 WS2812C LEDs driven from the Atom's small power
-// supply.  Limit each matrix channel to 128/255: Companion can send
-// full-white (255,255,255), which otherwise makes the panel very bright.
-//
-// This is deliberately separate from `brightness`, which is the Companion
-// control value and also drives the external tally LED.
-const uint8_t MATRIX_MAX_CHANNEL_VALUE = 128;
+// Companion's 0-100 brightness is mapped to the Atom Matrix controller's
+// conservative 0-20/255 range. RGB colour data and the external tally LED keep
+// their full 0-255 range.
+void applyMatrixBrightness() {
+  brightness = constrain(brightness, 0, 100);
+  M5.dis.setBrightness(map(brightness, 0, 100, 0, 20));
+}
 
 // 0=0°, 1=90° clockwise, 2=180°, 3=270° clockwise.  This applies to the
 // logical 5x5 canvas, including text, status icons and the status pixel.
@@ -354,9 +364,11 @@ int icons[13][25] = {
 // -------------------------------------------------------------------
 // WiFiManager Parameters
 // -------------------------------------------------------------------
+#ifndef ATOMIC_POE_BUILD
 WiFiManagerParameter* custom_companionIP;
 WiFiManagerParameter* custom_companionPort;
 WiFiManagerParameter* custom_rotation;
+#endif
 
 // Logger
 void logger(const String& s, const String& type = "info") {
@@ -367,9 +379,9 @@ void logger(const String& s, const String& type = "info") {
 // Matrix drawing helpers (Tally-Arbiter style)
 // -------------------------------------------------------------------
 int scaleMatrixColor(int rgb) {
-  const uint8_t r = min((rgb >> 16) & 0xFF, (int)MATRIX_MAX_CHANNEL_VALUE);
-  const uint8_t g = min((rgb >> 8)  & 0xFF, (int)MATRIX_MAX_CHANNEL_VALUE);
-  const uint8_t b = min(rgb & 0xFF, (int)MATRIX_MAX_CHANNEL_VALUE);
+  const uint8_t r = (rgb >> 16) & 0xFF;
+  const uint8_t g = (rgb >> 8)  & 0xFF;
+  const uint8_t b = rgb & 0xFF;
   return (r << 16) | (g << 8) | b;
 }
 
@@ -504,6 +516,7 @@ void setMatrixStatus(uint8_t status) {
 // -------------------------------------------------------------------
 // Config param helpers
 // -------------------------------------------------------------------
+#ifndef ATOMIC_POE_BUILD
 String getParam(const String& name) {
   if (wifiManager.server && wifiManager.server->hasArg(name))
     return wifiManager.server->arg(name);
@@ -522,6 +535,7 @@ void saveParamCallback() {
     preferences.putInt("rotation", matrixRotation = str_rotation.toInt() / 90);
   preferences.end();
 }
+#endif
 
 // ------------------------------------------------------------
 // Boot counter management
@@ -542,6 +556,7 @@ void eepromWriteBootCounter(int count) {
 // ------------------------------------------------------------
 // Config portal functions
 // ------------------------------------------------------------
+#ifndef ATOMIC_POE_BUILD
 void startConfigPortal() {
   Serial.println("[WiFi] Entering CONFIG PORTAL mode");
   matrixStatus = STATUS_CONFIG;
@@ -604,6 +619,7 @@ void startConfigPortal() {
   Serial.printf("[WiFi] Companion Host: %s\n", companion_host);
   Serial.printf("[WiFi] Companion Port: %s\n", companion_port);
 }
+#endif
 
 // -------------------------------------------------------------------
 // External LED + Matrix color handling
@@ -613,26 +629,20 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
   lastColorG = g;
   lastColorB = b;
 
-  uint8_t scaledR = r * max(brightness, 15) / 100;
-  uint8_t scaledG = g * max(brightness, 15) / 100;
-  uint8_t scaledB = b * max(brightness, 15) / 100;
-
   Serial.print("[COLOR] raw r/g/b = ");
   Serial.print(r); Serial.print("/");
   Serial.print(g); Serial.print("/");
-  Serial.print(b);
-  Serial.print("  scaled = ");
-  Serial.print(scaledR); Serial.print("/");
-  Serial.print(scaledG); Serial.print("/");
-  Serial.println(scaledB);
+  Serial.println(b);
 
-  // External RGB LED using new core 3.x API (pin-based)
-  writePwm(LED_PIN_RED,   LEDC_CHANNEL_RED,   scaledR);
-  writePwm(LED_PIN_GREEN, LEDC_CHANNEL_GREEN, scaledG);
-  writePwm(LED_PIN_BLUE,  LEDC_CHANNEL_BLUE,  scaledB);
+  // Atomic PoE owns these four pins, so only Wi-Fi builds drive the LED.
+#ifndef ATOMIC_POE_BUILD
+  writePwm(LED_PIN_RED,   LEDC_CHANNEL_RED,   r);
+  writePwm(LED_PIN_GREEN, LEDC_CHANNEL_GREEN, g);
+  writePwm(LED_PIN_BLUE,  LEDC_CHANNEL_BLUE,  b);
+#endif
 
   // Light the matrix in the tally colour, with one status pixel overlaid.
-  int rgb = (scaledR << 16) | (scaledG << 8) | scaledB;
+  int rgb = (r << 16) | (g << 8) | b;
   matrixBackgroundColor = rgb;
   matrixFill(rgb);
   tallyActive = (r != 0 || g != 0 || b != 0);
@@ -751,10 +761,12 @@ void parseAPI(const String& apiData) {
 
   if (apiData.startsWith("BRIGHTNESS")) {
     int valPos = apiData.indexOf("VALUE=");
+    if (valPos < 0) return;
     String v = apiData.substring(valPos + 6);
-    brightness = v.toInt();
-    Serial.println("[API] BRIGHTNESS set to " + String(brightness));
-    setExternalLedColor(lastColorR, lastColorG, lastColorB);
+    brightness = constrain(v.toInt(), 0, 100);
+    applyMatrixBrightness();
+    Serial.println("[API] BRIGHTNESS set to " + String(brightness) +
+                   " (matrix controller " + String(map(brightness, 0, 100, 0, 20)) + "/255)");
     return;
   }
 
@@ -820,13 +832,15 @@ void handlePostSettings() {
   if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "brightness must be 0-100"); return; }
   if (rotationValue.length() && !(rotationValue == "0" || rotationValue == "90" || rotationValue == "180" || rotationValue == "270")) { restServer.send(400, "text/plain", "rotation must be 0, 90, 180, or 270"); return; }
   if (!brightnessValue.length() && !rotationValue.length()) { restServer.send(400, "text/plain", "provide brightness and/or rotation"); return; }
-  if (brightnessValue.length()) brightness = brightnessValue.toInt();
+  if (brightnessValue.length()) {
+    brightness = brightnessValue.toInt();
+    applyMatrixBrightness();
+  }
   if (rotationValue.length()) matrixRotation = rotationValue.toInt() / 90;
   preferences.begin("companion", false);
   preferences.putInt("brightness", brightness);
   preferences.putInt("rotation", matrixRotation);
   preferences.end();
-  setExternalLedColor(lastColorR, lastColorG, lastColorB);
   restServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -877,11 +891,13 @@ void handlePostHost() {
     preferences.end();
     Serial.println("[REST] Preferences saved");
     
-    // Update WiFiManager parameter
+#ifndef ATOMIC_POE_BUILD
+    // Keep the Wi-Fi portal field in sync.
     if (custom_companionIP) {
       custom_companionIP->setValue(companion_host, sizeof(companion_host));
       Serial.println("[REST] WiFiManager parameter updated");
     }
+#endif
     
     restServer.send(200, "text/plain", "OK");
     Serial.println("[REST] POST /api/host: Updated to " + String(companion_host));
@@ -934,10 +950,11 @@ void handlePostPort() {
     preferences.putString("companionport", String(companion_port));
     preferences.end();
     
-    // Update WiFiManager parameter
+#ifndef ATOMIC_POE_BUILD
     if (custom_companionPort) {
       custom_companionPort->setValue(companion_port, sizeof(companion_port));
     }
+#endif
     
     restServer.send(200, "text/plain", "OK");
     Serial.println("[REST] POST /api/port: Updated to " + String(companion_port));
@@ -1037,13 +1054,14 @@ void handlePostConfig() {
     preferences.putString("companionport", String(companion_port));
     preferences.end();
     
-    // Update WiFiManager parameters
+#ifndef ATOMIC_POE_BUILD
     if (custom_companionIP) {
       custom_companionIP->setValue(companion_host, sizeof(companion_host));
     }
     if (custom_companionPort) {
       custom_companionPort->setValue(companion_port, sizeof(companion_port));
     }
+#endif
     
     restServer.send(200, "text/plain", "OK");
     Serial.println("[REST] POST /api/config: Updated host=" + String(companion_host) + " port=" + String(companion_port));
@@ -1075,10 +1093,11 @@ void handleFirmwareUpdatePage() {
 
 void handleFirmwareUpload() {
   if (firmwareUpdatePassword.length() && !restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword.c_str())) return;
-  HTTPUpload& upload = restServer.upload();
+  auto& upload = restServer.upload();
   if (upload.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
   else if (upload.status == UPLOAD_FILE_WRITE) Update.write(upload.buf, upload.currentSize);
   else if (upload.status == UPLOAD_FILE_END) Update.end(true);
+  else if (upload.status == UPLOAD_FILE_ABORTED) Update.abort();
 }
 
 void handleFirmwareUpdateResult() {
@@ -1095,7 +1114,27 @@ void handleFirmwareUpdatePassword() {
   restServer.send(200, "text/plain", firmwareUpdatePassword.length() ? "Update password saved." : "Update password removed.");
 }
 
+void handleConfigPage() {
+  const String html =
+    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>M5 Atom Matrix setup</title><h2>M5 Atom Matrix setup</h2>"
+    "<p>Network: "
+#ifdef ATOMIC_POE_BUILD
+    "Atomic PoE / W5500"
+#else
+    "Wi-Fi"
+#endif
+    "</p><label>Companion host <input id=h value='" + String(companion_host) +
+    "'></label><br><label>Port <input id=p value='" + String(companion_port) +
+    "'></label><br><button onclick=s()>Save</button> <a href=/update>Firmware update</a>"
+    "<pre id=o></pre><script>async function s(){let r=await fetch('/api/config',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
+    "o.textContent=await r.text()}</script>";
+  restServer.send(200, "text/html", html);
+}
+
 void setupRestServer() {
+  restServer.on("/", HTTP_GET, handleConfigPage);
   restServer.on("/api/host", HTTP_GET, handleGetHost);
   restServer.on("/api/port", HTTP_GET, handleGetPort);
   restServer.on("/api/config", HTTP_GET, handleGetConfig);
@@ -1123,6 +1162,7 @@ void setupRestServer() {
 // -------------------------------------------------------------------
 // WiFi + Config Portal
 // -------------------------------------------------------------------
+#ifndef ATOMIC_POE_BUILD
 void connectToNetwork() {
   if (stationIP != IPAddress(0,0,0,0))
     wifiManager.setSTAStaticIPConfig(stationIP, stationGW, stationMask);
@@ -1195,11 +1235,33 @@ void connectToNetwork() {
     }
   }
 }
+#else
+void connectToNetwork() {
+  uint8_t ethernetMac[6];
+  esp_read_mac(ethernetMac, ESP_MAC_WIFI_STA);
+
+  Serial.println("[Ethernet] Initialising Atomic PoE W5500");
+  SPI.begin(22, 23, 33, -1);
+  Ethernet.init(19);
+  while (Ethernet.begin(ethernetMac, 15000, 4000) == 0) {
+    Serial.println("[Ethernet] DHCP failed; retrying");
+    drawNumberArray(icons[9], badcolor);
+    delay(5000);
+  }
+  Serial.print("[Ethernet] DHCP address: ");
+  Serial.println(Ethernet.localIP());
+  drawNumberArray(icons[11], readycolor);
+}
+#endif
 
 // -------------------------------------------------------------------
 // Companion discovery
 // -------------------------------------------------------------------
 void initializeMDNS() {
+#ifdef ATOMIC_POE_BUILD
+  Serial.println("[mDNS] W5500 build: use the DHCP address and wired setup page");
+  return;
+#else
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[mDNS] WiFi is not connected; discovery is unavailable");
     return;
@@ -1226,6 +1288,7 @@ void initializeMDNS() {
   MDNS.addServiceTxt("companion-satellite", "tcp", "productName", "M5 Atom Matrix");
   MDNS.addServiceTxt("companion-satellite", "tcp", "apiVersion", "4");
   Serial.printf("[mDNS] Ready: %s.local (%s)\n", hostname.c_str(), instanceName.c_str());
+#endif
 }
 
 // -------------------------------------------------------------------
@@ -1235,13 +1298,16 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Booting M5 Atom Matrix Companion v4…");
 
-  // Make sure WiFi is initialised so MAC is valid
+  // Build the stable device ID from the ESP32 factory MAC.
+#ifndef ATOMIC_POE_BUILD
   WiFi.mode(WIFI_STA);
   delay(100);
-
-  // Build deviceID from full MAC
   uint8_t mac[6];
   WiFi.macAddress(mac);
+#else
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+#endif
 
   char macBuf[13];
   sprintf(macBuf, "%02X%02X%02X%02X%02X%02X",
@@ -1278,7 +1344,7 @@ void setup() {
   // Init M5 Atom
   M5.begin(true, false, true);
   delay(50);
-  M5.dis.setBrightness(20);  // M5Stack's recommended safe Atom Matrix level
+  applyMatrixBrightness();
   matrixOff();
 
   // Boot icon (simple “setup” sequence)
@@ -1290,7 +1356,8 @@ void setup() {
   delay(300);
   matrixOff();
 
-  // External LED setup
+  // External LED setup (the Atomic PoE base owns all four pins).
+#ifndef ATOMIC_POE_BUILD
   pinMode(LED_PIN_GND, OUTPUT);
   digitalWrite(LED_PIN_GND, LOW);
 
@@ -1313,10 +1380,12 @@ void setup() {
   setExternalLedColor(0, 0, 255);
   delay(250);
   setExternalLedColor(0,0,0);
+#endif
 
   // WiFi connect (with icons)
   
   // Boot counter logic for config portal trigger
+#ifndef ATOMIC_POE_BUILD
   bootCountCached = eepromReadBootCounter();
   Serial.printf("[Boot] Boot counter read: %u\n", bootCountCached);
   
@@ -1334,13 +1403,16 @@ void setup() {
     // Set boot counter to 1 during boot animations so user can reset to trigger portal
     eepromWriteBootCounter(1);
   }
+#endif
   
   connectToNetwork();
 
-  // OTA
+  // ArduinoOTA is Wi-Fi-specific; both variants retain browser updates.
+#ifndef ATOMIC_POE_BUILD
   ArduinoOTA.setHostname(deviceID.c_str());
   ArduinoOTA.setPassword("companion-satellite");
   ArduinoOTA.begin();
+#endif
 
   // Start REST API server after WiFi is connected
   setupRestServer();
@@ -1362,7 +1434,11 @@ void setup() {
 // -------------------------------------------------------------------
 void loop() {
   M5.update();
+#ifndef ATOMIC_POE_BUILD
   ArduinoOTA.handle();
+#else
+  Ethernet.maintain();
+#endif
   restServer.handleClient();
 
   unsigned long now = millis();
