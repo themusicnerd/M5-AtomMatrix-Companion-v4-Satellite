@@ -27,9 +27,20 @@ AU: https://www.jaycar.com.au/tricolour-rgb-5mm-led-600-1000mcd-round-diffused/
 USA: https://www.adafruit.com/product/302
 
 ## Installation and Usage
+### Initial install with ESPHome Web (recommended)
+
+1. Download `M5-AtomMatrix-Companion-v4-Satellite.ino.bin` from the latest GitHub release.
+2. Connect the Atom Matrix with a USB **data** cable and open [ESPHome Web](https://web.esphome.io/).
+3. Select **Connect**, choose the serial device, then choose **Install** and select the downloaded `.bin`.
+4. Configure Wi-Fi and Companion after boot. Later updates use `http://<device-ip>:9999/update` without USB.
+
+ESPHome Web is only the browser serial flasher; it does not convert this device into an ESPHome device.
+
+### Arduino development environment
+
 1. Clone the repository.  
 2. Open the M5AtomMatrix_Companionv4_SingleButtonSatellite.ino file in Arduino IDE.  
-3. Select the correct board: M5 Atom (ESP32).  
+3. Select the correct board: M5 Atom (ESP32), using **Minimal SPIFFS (Large APPs with OTA)** partition scheme.  
 4. Install libraries: M5Atom, WiFiManager, Preferences, ArduinoOTA.  
 5. Upload firmware to the device.  
 6. On first boot the LED matrix shows the boot sequence, then WiFi setup or Companion-wait status.  
