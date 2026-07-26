@@ -10,6 +10,10 @@ A single-button Companion v4 satellite built for the M5 Atom Matrix. Includes 5x
 - OTA firmware updates via ArduinoOTA
 - Auto-generated deviceID “M5ATOM_xxxxxxxxxxxx” based on full MAC address
 - Companion API support: KEY-STATE, COLOR, BRIGHTNESS, TEXT, PING, DEVICE-ADD
+- 3×5 pixel text font: short labels are centred and long labels scroll across the 5×5 matrix
+- Colour-only fallback: send an empty text label to use the matrix as a solid tally-colour indicator
+- Matrix output is capped at 128/255 per channel; the external RGB LED retains its full 255/255 range
+- Configurable matrix rotation: 0°, 90°, 180° or 270°
 - Codebase aligned with the AtomS3 and AtomS3R versions for consistent behaviour
 - Ready for release on GitHub and M5Burner
 
@@ -66,6 +70,14 @@ The AtomMatrix release uses the **Minimal SPIFFS (Large APPs with OTA)** partiti
 
 The top-left matrix pixel remains a connection indicator while the rest of the panel shows the Companion tally colour: blue = waiting/connecting, green = connected, orange = Wi-Fi setup, red = error.
 
+### Text and colour-only modes
+
+The Atom Matrix now advertises `TEXT=true` to Companion. Text sent with a key state is base64-decoded and rendered using a compact 3×5 font. Labels up to one glyph wide are centred; longer labels scroll continuously. The glyph is drawn in a contrasting colour over the Companion `COLOR` value.
+
+For background-colour-only mode, set the key text to empty. The panel then returns to the normal solid tally colour (with its connection-status pixel).
+
+Matrix rotation can be set in the Wi-Fi configuration portal or with `POST /api/settings`, for example `{"rotation":90}`. Valid values are 0, 90, 180 and 270. `GET /api/settings` reports the saved rotation alongside brightness.
+
 ## Troubleshooting
 Matrix LEDs blank: confirm Companion is sending COLOR or BITMAP data.  
 External LED not working: verify wiring and that the LED is common-cathode.  
@@ -74,7 +86,7 @@ Cannot connect to Companion: check host IP and port in WiFi portal settings.
 Brightness mismatches: ensure Companion is sending BRIGHTNESS commands.
 
 ## Version
-v1.2.0
+v1.3.2
 
 ## License
 MIT License

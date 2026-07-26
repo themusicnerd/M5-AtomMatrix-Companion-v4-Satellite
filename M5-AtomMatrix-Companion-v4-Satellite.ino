@@ -73,13 +73,16 @@ const unsigned long pingIntervalMs  = 2000;
 int brightness = 100;
 
 // The Atom Matrix is 25 WS2812C LEDs driven from the Atom's small power
-// supply.  Keep the colour data itself at 20% as a second, hardware-level
-// safeguard: Companion can send full-white (255,255,255), which otherwise
-// makes the whole panel uncomfortably bright and hot.
+// supply.  Limit each matrix channel to 128/255: Companion can send
+// full-white (255,255,255), which otherwise makes the panel very bright.
 //
 // This is deliberately separate from `brightness`, which is the Companion
 // control value and also drives the external tally LED.
-const uint8_t MATRIX_OUTPUT_SCALE_PERCENT = 20;
+const uint8_t MATRIX_MAX_CHANNEL_VALUE = 128;
+
+// 0=0°, 1=90° clockwise, 2=180°, 3=270° clockwise.  This applies to the
+// logical 5x5 canvas, including text, status icons and the status pixel.
+int matrixRotation = 0;
 
 // -------------------------------------------------------------------
 // External RGB LED (Jaycar RGB LED)  - ATOM MATRIX PINS
@@ -124,6 +127,17 @@ uint8_t lastColorB = 0;
 enum MatrixStatus { STATUS_BOOT, STATUS_WIFI, STATUS_CONFIG, STATUS_CONNECTED, STATUS_ERROR };
 MatrixStatus matrixStatus = STATUS_BOOT;
 bool tallyActive = false;
+
+// Companion can supply both COLOR and TEXT with a key state.  The Atom's
+// 5x5 panel is too small for a conventional display font, so text uses a
+// purpose-built 3x5 pixel font.  Short labels are centred and longer labels
+// scroll from right to left.  With no text, the existing colour-only tally
+// display remains in use.
+String matrixText = "";
+int matrixTextScroll = 0;
+unsigned long lastTextScrollTime = 0;
+const unsigned long textScrollIntervalMs = 180;
+int matrixBackgroundColor = 0x000000;
 
 // -------------------------------------------------------------------
 // Matrix number / icon system (ported from TallyArbiter project)
@@ -342,6 +356,7 @@ int icons[13][25] = {
 // -------------------------------------------------------------------
 WiFiManagerParameter* custom_companionIP;
 WiFiManagerParameter* custom_companionPort;
+WiFiManagerParameter* custom_rotation;
 
 // Logger
 void logger(const String& s, const String& type = "info") {
@@ -352,14 +367,23 @@ void logger(const String& s, const String& type = "info") {
 // Matrix drawing helpers (Tally-Arbiter style)
 // -------------------------------------------------------------------
 int scaleMatrixColor(int rgb) {
-  const uint8_t r = ((rgb >> 16) & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
-  const uint8_t g = ((rgb >> 8)  & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
-  const uint8_t b = (rgb & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  const uint8_t r = min((rgb >> 16) & 0xFF, (int)MATRIX_MAX_CHANNEL_VALUE);
+  const uint8_t g = min((rgb >> 8)  & 0xFF, (int)MATRIX_MAX_CHANNEL_VALUE);
+  const uint8_t b = min(rgb & 0xFF, (int)MATRIX_MAX_CHANNEL_VALUE);
   return (r << 16) | (g << 8) | b;
 }
 
 void matrixDrawPixel(uint8_t pixel, int rgb) {
-  M5.dis.drawpix(pixel, scaleMatrixColor(rgb));
+  uint8_t x = pixel % 5;
+  uint8_t y = pixel / 5;
+  uint8_t rotatedX = x;
+  uint8_t rotatedY = y;
+  switch (matrixRotation) {
+    case 1: rotatedX = 4 - y; rotatedY = x; break;
+    case 2: rotatedX = 4 - x; rotatedY = 4 - y; break;
+    case 3: rotatedX = y;     rotatedY = 4 - x; break;
+  }
+  M5.dis.drawpix(rotatedY * 5 + rotatedX, scaleMatrixColor(rgb));
 }
 
 void matrixFill(int rgb) {
@@ -386,6 +410,73 @@ void matrixOff() {
   matrixFill(0x000000);
 }
 
+// Each glyph is five rows of three bits, most-significant bit on the left.
+// Unsupported characters intentionally render as a blank space.
+uint8_t matrixGlyphRow(char c, uint8_t row) {
+  c = toupper((unsigned char)c);
+  static const uint8_t digits[10][5] = {
+    {7,5,5,5,7},{2,6,2,2,7},{7,1,7,4,7},{7,1,7,1,7},{5,5,7,1,1},
+    {7,4,7,1,7},{7,4,7,5,7},{7,1,2,2,2},{7,5,7,5,7},{7,5,7,1,7}
+  };
+  static const uint8_t letters[26][5] = {
+    {2,5,7,5,5},{6,5,6,5,6},{3,4,4,4,3},{6,5,5,5,6},{7,4,6,4,7},
+    {7,4,6,4,4},{3,4,5,5,3},{5,5,7,5,5},{7,2,2,2,7},{1,1,1,5,2},
+    {5,5,6,5,5},{4,4,4,4,7},{5,7,7,5,5},{5,7,7,7,5},{2,5,5,5,2},
+    {6,5,6,4,4},{2,5,5,7,3},{6,5,6,5,5},{3,4,2,1,6},{7,2,2,2,2},
+    {5,5,5,5,7},{5,5,5,5,2},{5,5,7,7,5},{5,5,2,5,5},{5,5,2,2,2},{7,1,2,4,7}
+  };
+  if (c >= '0' && c <= '9') return digits[c - '0'][row];
+  if (c >= 'A' && c <= 'Z') return letters[c - 'A'][row];
+  switch (c) {
+    case '-': return row == 2 ? 7 : 0;
+    case '_': return row == 4 ? 7 : 0;
+    case '.': return row == 4 ? 2 : 0;
+    case ':': return (row == 1 || row == 3) ? 2 : 0;
+    case '!': return (row == 0 || row == 1 || row == 2 || row == 4) ? 2 : 0;
+    case '/': return row == 0 ? 1 : row == 1 ? 1 : row == 2 ? 2 : row == 3 ? 4 : 4;
+    default: return 0;
+  }
+}
+
+int matrixTextColor() {
+  // Contrast is based on the source tally colour rather than its brightness-
+  // scaled output, so dim white still receives a dark glyph.
+  const int r = lastColorR;
+  const int g = lastColorG;
+  const int b = lastColorB;
+  // Use a high-contrast foreground so text remains readable on tally colours.
+  return (r * 299 + g * 587 + b * 114 > 150000) ? RGB_COLOR_BLACK : RGB_COLOR_WARMWHITE;
+}
+
+void renderMatrixText() {
+  matrixFill(matrixBackgroundColor);
+  if (!matrixText.length()) return;
+
+  const int textWidth = matrixText.length() * 4 - 1;
+  const int startX = textWidth <= 5 ? (5 - textWidth) / 2 : -matrixTextScroll;
+  const int foreground = matrixTextColor();
+  for (uint16_t character = 0; character < matrixText.length(); character++) {
+    const int glyphX = startX + character * 4;
+    for (uint8_t y = 0; y < 5; y++) {
+      const uint8_t bits = matrixGlyphRow(matrixText[character], y);
+      for (uint8_t x = 0; x < 3; x++) {
+        const int panelX = glyphX + x;
+        if ((bits & (4 >> x)) && panelX >= 0 && panelX < 5) matrixDrawPixel(y * 5 + panelX, foreground);
+      }
+    }
+  }
+}
+
+void updateMatrixTextScroll() {
+  if (!matrixText.length() || matrixText.length() * 4 - 1 <= 5) return;
+  const unsigned long now = millis();
+  if (now - lastTextScrollTime < textScrollIntervalMs) return;
+  lastTextScrollTime = now;
+  const int scrollWidth = matrixText.length() * 4 + 5; // blank gap before repeating
+  matrixTextScroll = (matrixTextScroll + 1) % scrollWidth;
+  renderMatrixText();
+}
+
 int matrixStatusColor() {
   switch (matrixStatus) {
     case STATUS_CONFIG:    return RGB_COLOR_ORANGE;
@@ -397,6 +488,10 @@ int matrixStatusColor() {
 }
 
 void renderMatrixStatus() {
+  if (matrixText.length()) {
+    renderMatrixText();
+    return;
+  }
   if (!tallyActive) matrixFill(RGB_COLOR_BLACK);
   matrixDrawPixel(0, matrixStatusColor());
 }
@@ -418,10 +513,13 @@ String getParam(const String& name) {
 void saveParamCallback() {
   String str_companionIP   = getParam("companionIP");
   String str_companionPort = getParam("companionPort");
+  String str_rotation      = getParam("rotation");
 
   preferences.begin("companion", false);
   if (str_companionIP.length() > 0)   preferences.putString("companionip", str_companionIP);
   if (str_companionPort.length() > 0) preferences.putString("companionport", str_companionPort);
+  if (str_rotation == "0" || str_rotation == "90" || str_rotation == "180" || str_rotation == "270")
+    preferences.putInt("rotation", matrixRotation = str_rotation.toInt() / 90);
   preferences.end();
 }
 
@@ -452,14 +550,17 @@ void startConfigPortal() {
   preferences.begin("companion", true);
   String savedHost = preferences.getString("companionip", "Companion IP");
   String savedPort = preferences.getString("companionport", "16622");
+  String savedRotation = String(preferences.getInt("rotation", 0) * 90);
   preferences.end();
 
   // Prepare WiFiManager with params
   custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", savedHost.c_str(), 40);
   custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", savedPort.c_str(), 6);
+  custom_rotation      = new WiFiManagerParameter("rotation", "Matrix rotation (0, 90, 180, 270)", savedRotation.c_str(), 4);
 
   wifiManager.addParameter(custom_companionIP);
   wifiManager.addParameter(custom_companionPort);
+  wifiManager.addParameter(custom_rotation);
   wifiManager.setSaveParamsCallback(saveParamCallback);
 
   std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
@@ -488,11 +589,15 @@ void startConfigPortal() {
 
   strncpy(companion_port, custom_companionPort->getValue(), sizeof(companion_port));
   companion_port[sizeof(companion_port) - 1] = '\0';
+  const int rotationDegrees = String(custom_rotation->getValue()).toInt();
+  if (rotationDegrees == 0 || rotationDegrees == 90 || rotationDegrees == 180 || rotationDegrees == 270)
+    matrixRotation = rotationDegrees / 90;
 
   // Save to preferences
   preferences.begin("companion", false);
   preferences.putString("companionip", String(companion_host));
   preferences.putString("companionport", String(companion_port));
+  preferences.putInt("rotation", matrixRotation);
   preferences.end();
 
   Serial.println("[WiFi] Config portal completed");
@@ -528,6 +633,7 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
 
   // Light the matrix in the tally colour, with one status pixel overlaid.
   int rgb = (scaledR << 16) | (scaledG << 8) | scaledB;
+  matrixBackgroundColor = rgb;
   matrixFill(rgb);
   tallyActive = (r != 0 || g != 0 || b != 0);
   renderMatrixStatus();
@@ -543,9 +649,48 @@ void sendAddDevice() {
   cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
         " PRODUCT_NAME=\"M5 Atom Matrix\" "
         "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
-        "COLORS=rgb TEXT=false BITMAPS=0";
+        "COLORS=rgb TEXT=true BITMAPS=0";
   client.println(cmd);
   Serial.println("[API] Sent: " + cmd);
+}
+
+String decodeCompanionText(const String& encoded) {
+  // Companion sends text as base64.  This small decoder accepts plain text as
+  // well, which keeps manual API testing convenient.
+  const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  int value = 0;
+  int bits = -8;
+  String decoded;
+  for (uint16_t i = 0; i < encoded.length(); i++) {
+    const char c = encoded[i];
+    if (c == '=') break;
+    const char* pos = strchr(alphabet, c);
+    if (!pos) return encoded;
+    value = (value << 6) | (pos - alphabet);
+    bits += 6;
+    if (bits >= 0) {
+      decoded += char((value >> bits) & 0xFF);
+      bits -= 8;
+    }
+  }
+  return decoded.length() ? decoded : encoded;
+}
+
+void handleKeyStateText(const String& line) {
+  const int textPos = line.indexOf("TEXT=");
+  if (textPos < 0) return;
+  const int firstQuote = line.indexOf('"', textPos);
+  if (firstQuote < 0) return;
+  const int secondQuote = line.indexOf('"', firstQuote + 1);
+  if (secondQuote < 0) return;
+
+  String text = decodeCompanionText(line.substring(firstQuote + 1, secondQuote));
+  text.replace("\\n", " ");
+  matrixText = text;
+  matrixTextScroll = 0;
+  lastTextScrollTime = millis();
+  Serial.println("[API] TEXT = \"" + matrixText + "\"");
+  renderMatrixStatus();
 }
 
 void handleKeyState(const String& line) {
@@ -616,6 +761,7 @@ void parseAPI(const String& apiData) {
   if (apiData.startsWith("KEYS-CLEAR")) {
     Serial.println("[API] KEYS-CLEAR received");
     matrixOff();
+    matrixText = "";
     tallyActive = false;
     renderMatrixStatus();
     setExternalLedColor(0,0,0);
@@ -624,6 +770,7 @@ void parseAPI(const String& apiData) {
 
   if (apiData.startsWith("KEY-STATE")) {
     handleKeyState(apiData);
+    handleKeyStateText(apiData);
     return;
   }
 }
@@ -664,14 +811,21 @@ String jsonSetting(const String& body, const char* name) {
 }
 
 void handleGetSettings() {
-  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + "}");
+  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + ",\"rotation\":" + String(matrixRotation * 90) + "}");
 }
 
 void handlePostSettings() {
-  const String value = jsonSetting(restServer.arg("plain"), "brightness");
-  if (!value.length() || value.toInt() < 0 || value.toInt() > 100) { restServer.send(400, "text/plain", "brightness must be 0-100"); return; }
-  brightness = value.toInt();
-  preferences.begin("companion", false); preferences.putInt("brightness", brightness); preferences.end();
+  const String brightnessValue = jsonSetting(restServer.arg("plain"), "brightness");
+  const String rotationValue = jsonSetting(restServer.arg("plain"), "rotation");
+  if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "brightness must be 0-100"); return; }
+  if (rotationValue.length() && !(rotationValue == "0" || rotationValue == "90" || rotationValue == "180" || rotationValue == "270")) { restServer.send(400, "text/plain", "rotation must be 0, 90, 180, or 270"); return; }
+  if (!brightnessValue.length() && !rotationValue.length()) { restServer.send(400, "text/plain", "provide brightness and/or rotation"); return; }
+  if (brightnessValue.length()) brightness = brightnessValue.toInt();
+  if (rotationValue.length()) matrixRotation = rotationValue.toInt() / 90;
+  preferences.begin("companion", false);
+  preferences.putInt("brightness", brightness);
+  preferences.putInt("rotation", matrixRotation);
+  preferences.end();
   setExternalLedColor(lastColorR, lastColorG, lastColorB);
   restServer.send(200, "application/json", "{\"ok\":true}");
 }
@@ -978,9 +1132,12 @@ void connectToNetwork() {
 
   custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", companion_host, 40);
   custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", companion_port, 6);
+  String rotationString = String(matrixRotation * 90);
+  custom_rotation      = new WiFiManagerParameter("rotation", "Matrix rotation (0, 90, 180, 270)", rotationString.c_str(), 4);
 
   wifiManager.addParameter(custom_companionIP);
   wifiManager.addParameter(custom_companionPort);
+  wifiManager.addParameter(custom_rotation);
   wifiManager.setSaveParamsCallback(saveParamCallback);
 
   std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
@@ -1105,6 +1262,8 @@ void setup() {
   if (preferences.getString("companionport").length() > 0)
     preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
   brightness = preferences.getInt("brightness", 100);
+  matrixRotation = preferences.getInt("rotation", 0);
+  if (matrixRotation < 0 || matrixRotation > 3) matrixRotation = 0;
   firmwareUpdatePassword = preferences.getString("updatepassword", "");
   preferences.end();
 
@@ -1207,6 +1366,7 @@ void loop() {
   restServer.handleClient();
 
   unsigned long now = millis();
+  updateMatrixTextScroll();
 
   // Companion connect / reconnect
   if (!client.connected() && (now - lastConnectTry >= connectRetryMs)) {
