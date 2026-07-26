@@ -29,12 +29,12 @@ USA: https://www.adafruit.com/product/302
 ## Installation and Usage
 ### Initial install with ESPHome Web (recommended)
 
-1. Download `M5-AtomMatrix-Companion-v4-Satellite.ino.bin` from the latest GitHub release.
+1. Download `M5-AtomMatrix-Companion-v4-Satellite-factory.bin` from the latest GitHub release. This is the complete first-install image.
 2. Connect the Atom Matrix with a USB **data** cable and open [ESPHome Web](https://web.esphome.io/).
 3. Select **Connect**, choose the serial device, then choose **Install** and select the downloaded `.bin`.
 4. Configure Wi-Fi and Companion after boot. Later updates use `http://<device-ip>:9999/update` without USB.
 
-ESPHome Web is only the browser serial flasher; it does not convert this device into an ESPHome device.
+There are two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
 
 ### Arduino development environment
 
