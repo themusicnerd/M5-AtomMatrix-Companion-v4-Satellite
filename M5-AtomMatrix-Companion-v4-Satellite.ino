@@ -86,9 +86,34 @@ const int LED_PIN_GND   = 23;  // G23 (ground for LED)
 const int pwmFreq       = 5000; // 5 kHz
 const int pwmResolution = 8;
 
+bool attachPwm(uint8_t pin, uint8_t channel) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  return ledcAttach(pin, pwmFreq, pwmResolution);
+#else
+  ledcSetup(channel, pwmFreq, pwmResolution);
+  ledcAttachPin(pin, channel);
+  return true;
+#endif
+}
+
+void writePwm(uint8_t pin, uint8_t channel, uint8_t value) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(pin, value);
+#else
+  ledcWrite(channel, value);
+#endif
+}
+
 uint8_t lastColorR = 0;
 uint8_t lastColorG = 0;
 uint8_t lastColorB = 0;
+
+// The 5x5 panel is also the tally indicator, so reserve its top-left pixel as
+// a small connection-status light.  The remaining 24 pixels retain the colour
+// sent by Companion.
+enum MatrixStatus { STATUS_BOOT, STATUS_WIFI, STATUS_CONFIG, STATUS_CONNECTED, STATUS_ERROR };
+MatrixStatus matrixStatus = STATUS_BOOT;
+bool tallyActive = false;
 
 // -------------------------------------------------------------------
 // Matrix number / icon system (ported from TallyArbiter project)
@@ -336,6 +361,26 @@ void matrixOff() {
   M5.dis.fillpix(0x000000);
 }
 
+int matrixStatusColor() {
+  switch (matrixStatus) {
+    case STATUS_CONFIG:    return RGB_COLOR_ORANGE;
+    case STATUS_CONNECTED: return RGB_COLOR_GREEN;
+    case STATUS_ERROR:     return RGB_COLOR_RED;
+    case STATUS_WIFI:      return RGB_COLOR_BLUE;
+    default:               return RGB_COLOR_DIMWHITE;
+  }
+}
+
+void renderMatrixStatus() {
+  if (!tallyActive) M5.dis.fillpix(RGB_COLOR_BLACK);
+  M5.dis.drawpix(0, matrixStatusColor());
+}
+
+void setMatrixStatus(uint8_t status) {
+  matrixStatus = static_cast<MatrixStatus>(status);
+  renderMatrixStatus();
+}
+
 // -------------------------------------------------------------------
 // Config param helpers
 // -------------------------------------------------------------------
@@ -376,6 +421,7 @@ void eepromWriteBootCounter(int count) {
 // ------------------------------------------------------------
 void startConfigPortal() {
   Serial.println("[WiFi] Entering CONFIG PORTAL mode");
+  matrixStatus = STATUS_CONFIG;
   
   // Load Companion config from preferences (for default field values)
   preferences.begin("companion", true);
@@ -451,13 +497,15 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
   Serial.println(scaledB);
 
   // External RGB LED using new core 3.x API (pin-based)
-  ledcWrite(LED_PIN_RED,   scaledR);
-  ledcWrite(LED_PIN_GREEN, scaledG);
-  ledcWrite(LED_PIN_BLUE,  scaledB);
+  writePwm(LED_PIN_RED,   LEDC_CHANNEL_RED,   scaledR);
+  writePwm(LED_PIN_GREEN, LEDC_CHANNEL_GREEN, scaledG);
+  writePwm(LED_PIN_BLUE,  LEDC_CHANNEL_BLUE,  scaledB);
 
-  // Also light the whole Matrix in that color (Tally style)
+  // Light the matrix in the tally colour, with one status pixel overlaid.
   int rgb = (scaledR << 16) | (scaledG << 8) | scaledB;
   M5.dis.fillpix(rgb);
+  tallyActive = (r != 0 || g != 0 || b != 0);
+  renderMatrixStatus();
 }
 
 // -------------------------------------------------------------------
@@ -470,7 +518,7 @@ void sendAddDevice() {
   cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
         " PRODUCT_NAME=\"M5 Atom Matrix\" "
         "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
-        "COLORS=rgb TEXT=true";
+        "COLORS=rgb TEXT=false BITMAPS=0";
   client.println(cmd);
   Serial.println("[API] Sent: " + cmd);
 }
@@ -543,6 +591,8 @@ void parseAPI(const String& apiData) {
   if (apiData.startsWith("KEYS-CLEAR")) {
     Serial.println("[API] KEYS-CLEAR received");
     matrixOff();
+    tallyActive = false;
+    renderMatrixStatus();
     setExternalLedColor(0,0,0);
     return;
   }
@@ -900,6 +950,38 @@ void connectToNetwork() {
 }
 
 // -------------------------------------------------------------------
+// Companion discovery
+// -------------------------------------------------------------------
+void initializeMDNS() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[mDNS] WiFi is not connected; discovery is unavailable");
+    return;
+  }
+
+  const String shortId = deviceID.substring(deviceID.length() - 5);
+  const String hostname = "m5atom-matrix_" + shortId;
+  const String instanceName = "m5atom-matrix:" + shortId;
+
+  if (!MDNS.begin(hostname.c_str())) {
+    Serial.println("[mDNS] Error setting up mDNS responder!");
+    return;
+  }
+
+  MDNS.setInstanceName(instanceName.c_str());
+  if (!MDNS.addService("companion-satellite", "tcp", 9999)) {
+    Serial.println("[mDNS] companion-satellite service registration failed!");
+    return;
+  }
+
+  MDNS.addServiceTxt("companion-satellite", "tcp", "restEnabled", "true");
+  MDNS.addServiceTxt("companion-satellite", "tcp", "deviceId", shortId.c_str());
+  MDNS.addServiceTxt("companion-satellite", "tcp", "prefix", "m5atom-matrix");
+  MDNS.addServiceTxt("companion-satellite", "tcp", "productName", "M5 Atom Matrix");
+  MDNS.addServiceTxt("companion-satellite", "tcp", "apiVersion", "4");
+  Serial.printf("[mDNS] Ready: %s.local (%s)\n", hostname.c_str(), instanceName.c_str());
+}
+
+// -------------------------------------------------------------------
 // SETUP
 // -------------------------------------------------------------------
 void setup() {
@@ -962,9 +1044,9 @@ void setup() {
   digitalWrite(LED_PIN_GND, LOW);
 
   Serial.println("[LED] Initialising PWM (esp32-hal-ledc, pin-based)...");
-  bool okR = ledcAttach(LED_PIN_RED,   pwmFreq, pwmResolution);
-  bool okG = ledcAttach(LED_PIN_GREEN, pwmFreq, pwmResolution);
-  bool okB = ledcAttach(LED_PIN_BLUE,  pwmFreq, pwmResolution);
+  bool okR = attachPwm(LED_PIN_RED,   LEDC_CHANNEL_RED);
+  bool okG = attachPwm(LED_PIN_GREEN, LEDC_CHANNEL_GREEN);
+  bool okB = attachPwm(LED_PIN_BLUE,  LEDC_CHANNEL_BLUE);
 
   Serial.print("[LED] ledcAttach RED: ");   Serial.println(okR);
   Serial.print("[LED] ledcAttach GREEN: "); Serial.println(okG);
@@ -1012,53 +1094,10 @@ void setup() {
   // Start REST API server after WiFi is connected
   setupRestServer();
 
-  // Initialize mDNS service after WiFi is connected
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("[mDNS] Starting mDNS service...");
-    
-    // Extract short MAC for hostname (first 5 chars like LEDMatrixClock)
-    String macShort = deviceID.substring(deviceID.length() - 5); // Use last 5 chars like LEDMatrixClock
-    
-    // Start mDNS with underscore hostname format
-    String mDNSHostname = "m5atom-matrix_" + macShort;
-    if (!MDNS.begin(mDNSHostname.c_str())) {
-      Serial.println("[mDNS] Error setting up mDNS responder!");
-    } else {
-      Serial.println("[mDNS] mDNS responder started");
-      Serial.printf("[mDNS] Hostname: %s.local\n", mDNSHostname.c_str());
-      Serial.printf("[mDNS] IP Address: %s\n", WiFi.localIP().toString().c_str());
-      
-      // Set instance name for mDNS
-      String mDNSInstanceName = "m5atom-matrix:" + macShort;
-      MDNS.setInstanceName(mDNSInstanceName);
-      Serial.printf("[mDNS] Instance name set to: %s\n", mDNSInstanceName.c_str());
-      
-      // Add companion-satellite service
-      bool serviceAdded = MDNS.addService("companion-satellite", "tcp", 9999);
-      if (serviceAdded) {
-        Serial.println("[mDNS] SUCCESS: companion-satellite service registered!");
-        
-        // Add service text records (matching LEDMatrixClock)
-        MDNS.addServiceTxt("companion-satellite", "tcp", "restEnabled", "true");
-        Serial.println("[mDNS] Added service TXT record: restEnabled=true");
-        
-        // ESP32 mDNS handles updates automatically, just add small delays
-        for (int i = 0; i < 3; i++) {
-          delay(100);
-          Serial.printf("[mDNS] Setup delay %d/3 completed\n", i+1);
-        }
-        
-        Serial.println("[mDNS] Setup complete - service discoverable");
-        Serial.println("[mDNS] Test with: dns-sd -B companion-satellite._tcp");
-        Serial.println("[mDNS] SUCCESS: Full companion-satellite service name working!");
-      } else {
-        Serial.println("[mDNS] ERROR: companion-satellite service registration failed!");
-      }
-    }
-  }
+  initializeMDNS();
 
   // Show “waiting for Companion” icon (single dot)
-  drawNumberArray(number[0], offcolor);
+  setMatrixStatus(STATUS_WIFI);
   
   // Successful boot completed - set boot counter to 0
   eepromWriteBootCounter(0);
@@ -1087,17 +1126,19 @@ void loop() {
 
     if (client.connect(companion_host, atoi(companion_port))) {
       Serial.println("[NET] Connected to Companion API");
+      matrixStatus = STATUS_CONNECTED;
       // Good icon when Companion connects
       drawNumberArray(icons[11], readycolor);
       delay(300);
-      drawNumberArray(number[0], offcolor); // back to dot
+      renderMatrixStatus();
       sendAddDevice();
       lastPingTime = millis();
     } else {
       Serial.println("[NET] Companion connect failed");
+      matrixStatus = STATUS_ERROR;
       drawNumberArray(icons[9], badcolor); // error icon briefly
       delay(200);
-      drawNumberArray(number[0], offcolor);
+      renderMatrixStatus();
     }
   }
 
