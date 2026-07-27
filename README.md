@@ -6,7 +6,7 @@ A single-button Companion v4 satellite built for the M5 Atom Matrix. Separate Wi
 - 5x5 matrix icon system for Boot, WiFi Setup, Waiting for Companion, Ready and Error states
 - External RGB LED control on G33 (Red), G22 (Green), G19 (Blue) with G23 Ground
 - External LED mirrors Companion key colour with brightness scaling
-- WiFiManager configuration portal (hold button for 5 seconds)
+- WiFiManager configuration portal (hold the button while powering on or restarting)
 - OTA firmware updates via ArduinoOTA
 - Auto-generated deviceID “M5ATOM_xxxxxxxxxxxx” based on full MAC address
 - Companion API support: KEY-STATE, COLOR, BRIGHTNESS, TEXT, PING, DEVICE-ADD
@@ -43,7 +43,7 @@ USA: https://www.adafruit.com/product/302
 
 Each network variant has two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
 
-The v1.3.10 release provides both network variants:
+The v1.3.11 release provides both network variants:
 
 - `*-wifi-factory.bin` / `*-wifi.ino.bin` — Wi-FiManager, mDNS and external RGB LED.
 - `*-poe-factory.bin` / `*-poe.ino.bin` — Atomic PoE Base, W5500 DHCP and wired setup at `http://<dhcp-ip>:9999/`.
@@ -61,7 +61,7 @@ The PoE build uses G22=SCK, G23=MISO, G33=MOSI and G19=CS. Its DHCP address is p
 7. On first boot the LED matrix shows the boot sequence, then WiFi setup or Companion-wait status.
 8. In Companion v4: add the device under Surfaces and select the shown deviceID.
 9. Press the button to trigger Companion key events.
-10. Hold button for 5 seconds to open the WiFi config portal (SSID equals deviceID).
+10. Hold the button while powering on or restarting to open the Wi-Fi config portal (SSID equals deviceID).
 
 ## OTA Firmware Update
 OTA updates are enabled.  
@@ -104,7 +104,7 @@ Cannot connect to Companion: check host IP and port in WiFi portal settings.
 Brightness mismatches: ensure Companion is sending BRIGHTNESS commands.
 
 ## Version
-v1.3.10
+v1.3.11
 
 ## License
 MIT License

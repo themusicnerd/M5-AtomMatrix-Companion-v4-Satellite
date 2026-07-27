@@ -66,10 +66,6 @@ String deviceID = "";
 // WiFi hostname for mDNS
 String wifiHostname = "";
 
-// Boot counter for config portal trigger
-const uint8_t BOOT_FAIL_LIMIT = 1;
-int bootCountCached = 0;
-
 // AP password for config portal (empty = open)
 const char* AP_password = "";
 
@@ -536,22 +532,6 @@ void saveParamCallback() {
   preferences.end();
 }
 #endif
-
-// ------------------------------------------------------------
-// Boot counter management
-// ------------------------------------------------------------
-int eepromReadBootCounter() {
-  preferences.begin("companion", true);
-  int count = preferences.getInt("bootCounter", 0);
-  preferences.end();
-  return count;
-}
-
-void eepromWriteBootCounter(int count) {
-  preferences.begin("companion", false);
-  preferences.putInt("bootCounter", count);
-  preferences.end();
-}
 
 // ------------------------------------------------------------
 // Config portal functions
@@ -1412,26 +1392,12 @@ void setup() {
   setExternalLedColor(0,0,0);
 #endif
 
-  // WiFi connect (with icons)
-  
-  // Boot counter logic for config portal trigger
+  // Match AtomS3 setup entry: hold the button while powering on/restarting.
 #ifndef ATOMIC_POE_BUILD
-  bootCountCached = eepromReadBootCounter();
-  Serial.printf("[Boot] Boot counter read: %u\n", bootCountCached);
-  
-  if (bootCountCached == 1) {
-    // Boot counter 1 → trigger config portal (user reset during boot animations)
-    Serial.println("[Boot] Boot counter 1 → triggering config portal");
-    eepromWriteBootCounter(0);  // Reset immediately
-    bootCountCached = 0;
+  M5.update();
+  if (M5.Btn.isPressed()) {
+    Serial.println("[Boot] Button held: starting setup AP");
     startConfigPortal();
-    // startConfigPortal() will handle setup icons
-    return;  // Skip normal boot sequence
-  } else {
-    // Boot counter 0 (or any other value) → normal boot
-    Serial.println("[Boot] Boot counter 0 → normal boot");
-    // Set boot counter to 1 during boot animations so user can reset to trigger portal
-    eepromWriteBootCounter(1);
   }
 #endif
   
@@ -1451,10 +1417,6 @@ void setup() {
 
   // Show “waiting for Companion” icon (single dot)
   setMatrixStatus(STATUS_WIFI);
-  
-  // Successful boot completed - set boot counter to 0
-  eepromWriteBootCounter(0);
-  Serial.println("[Boot] Successful boot completed - boot counter reset to 0");
   
   Serial.println("[System] Setup complete, entering main loop.");
 }
