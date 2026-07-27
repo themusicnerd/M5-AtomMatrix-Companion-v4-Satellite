@@ -77,6 +77,13 @@ ArduinoOTA password: companion-satellite. Browser updates are open by default an
 
 The AtomMatrix release uses the **Minimal SPIFFS (Large APPs with OTA)** partition scheme; keep that partition scheme when building firmware. Only the release application `.bin` can be installed through the browser.
 
+### Port 9999 troubleshooting dashboard
+
+Browse to `http://<device-ip>:9999/` to see the device name and ID, network and
+Companion connection status, current IP, brightness, latest incoming text and
+RGB colour, and uptime. The dashboard refreshes every two seconds. Firmware
+updates remain available at `http://<device-ip>:9999/update`.
+
 ### 5x5 status indicator
 
 The top-left matrix pixel remains a connection indicator while the rest of the panel shows the Companion tally colour: blue = waiting/connecting, green = connected, orange = Wi-Fi setup, red = error.

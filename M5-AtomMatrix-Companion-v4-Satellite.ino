@@ -1114,10 +1114,34 @@ void handleFirmwareUpdatePassword() {
   restServer.send(200, "text/plain", firmwareUpdatePassword.length() ? "Update password saved." : "Update password removed.");
 }
 
+String statusJsonEscape(String value) {
+  value.replace("\\", "\\\\"); value.replace("\"", "\\\"");
+  value.replace("\n", "\\n"); value.replace("\r", "\\r");
+  return value;
+}
+
+void handleStatus() {
+  String json = "{\"deviceName\":\"M5 Atom Matrix\",\"deviceId\":\"" + statusJsonEscape(deviceID) + "\",";
+#ifdef ATOMIC_POE_BUILD
+  json += "\"network\":\"ethernet\",\"networkConnected\":" + String(Ethernet.linkStatus() == LinkON ? "true" : "false") + ",";
+#else
+  json += "\"network\":\"wifi\",\"networkConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+  json += "\"ssid\":\"" + statusJsonEscape(WiFi.SSID()) + "\",\"ip\":\"" + WiFi.localIP().toString() + "\",";
+#endif
+  json += "\"companionConnected\":" + String(client.connected() ? "true" : "false") + ",";
+  json += "\"companion\":\"" + statusJsonEscape(String(companion_host) + ":" + companion_port) + "\",";
+  json += "\"brightness\":" + String(brightness) + ",\"text\":\"" + statusJsonEscape(matrixText) + "\",";
+  json += "\"color\":{\"r\":" + String(lastColorR) + ",\"g\":" + String(lastColorG) + ",\"b\":" + String(lastColorB) + "},";
+  json += "\"uptimeSeconds\":" + String(millis() / 1000) + "}";
+  restServer.send(200, "application/json", json);
+}
+
 void handleConfigPage() {
   const String html =
     "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>M5 Atom Matrix setup</title><h2>M5 Atom Matrix setup</h2>"
+    "<title>M5 Atom Matrix</title><h2>M5 Atom Matrix</h2><h3>Live troubleshooting status</h3>"
+    "<div id=state>Loading...</div><p>Incoming text: <code id=t>-</code></p>"
+    "<p>Incoming colour: <span id=sw style='display:inline-block;width:2em;height:1em;border:1px solid'></span> <code id=c>-</code></p>"
     "<p>Network: "
 #ifdef ATOMIC_POE_BUILD
     "Atomic PoE / W5500"
@@ -1129,7 +1153,12 @@ void handleConfigPage() {
     "'></label><br><button onclick=s()>Save</button> <a href=/update>Firmware update</a>"
     "<pre id=o></pre><script>async function s(){let r=await fetch('/api/config',{method:'POST',"
     "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
-    "o.textContent=await r.text()}</script>";
+    "o.textContent=await r.text()}async function u(){try{let x=await(await fetch('/api/status')).json();"
+    "state.textContent=(x.networkConnected?'Network connected':'Network disconnected')+' | '+"
+    "(x.companionConnected?'Companion connected':'Companion disconnected')+' | '+(x.ip||x.network);"
+    "t.textContent=x.text||'(none)';let q=x.color;c.textContent=`rgb(${q.r}, ${q.g}, ${q.b})`;"
+    "sw.style.background=`rgb(${q.r},${q.g},${q.b})`}catch(e){state.textContent='Status unavailable'}}"
+    "u();setInterval(u,2000)</script>";
   restServer.send(200, "text/html", html);
 }
 
@@ -1139,6 +1168,7 @@ void setupRestServer() {
   restServer.on("/api/port", HTTP_GET, handleGetPort);
   restServer.on("/api/config", HTTP_GET, handleGetConfig);
   restServer.on("/api/settings", HTTP_GET, handleGetSettings);
+  restServer.on("/api/status", HTTP_GET, handleStatus);
   
   restServer.on("/api/host", HTTP_POST, handlePostHost);
   restServer.on("/api/port", HTTP_POST, handlePostPort);
