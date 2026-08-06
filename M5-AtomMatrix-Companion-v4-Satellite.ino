@@ -82,6 +82,7 @@ int brightness = 100;
 // FastLED scaling internally. Keep the matrix at the library's known-safe 20%
 // ceiling. RGB colour data and the external tally LED keep their full range.
 const uint8_t MATRIX_MAX_BRIGHTNESS_PERCENT = 20;
+const uint8_t MATRIX_OUTPUT_SCALE_PERCENT = 20;
 
 void applyMatrixBrightness() {
   brightness = constrain(brightness, 0, 100);
@@ -377,9 +378,12 @@ void logger(const String& s, const String& type = "info") {
 // Matrix drawing helpers (Tally-Arbiter style)
 // -------------------------------------------------------------------
 int scaleMatrixColor(int rgb) {
-  const uint8_t r = (rgb >> 16) & 0xFF;
-  const uint8_t g = (rgb >> 8)  & 0xFF;
-  const uint8_t b = rgb & 0xFF;
+  // Apply the safety limit to the stored LED data as well as the controller
+  // brightness. Full white becomes (51,51,51), so R+G+B never exceeds 153
+  // even if a library/core version ignores or resets global brightness.
+  const uint8_t r = ((rgb >> 16) & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  const uint8_t g = ((rgb >> 8)  & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  const uint8_t b = (rgb & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
   return (r << 16) | (g << 8) | b;
 }
 

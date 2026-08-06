@@ -12,7 +12,7 @@ A single-button Companion v4 satellite built for the M5 Atom Matrix. Separate Wi
 - Companion API support: KEY-STATE, COLOR, BRIGHTNESS, TEXT, PING, DEVICE-ADD
 - 3×5 pixel text font: short labels are centred and long labels scroll across the 5×5 matrix
 - Colour-only fallback: send an empty text label to use the matrix as a solid tally-colour indicator
-- Matrix colour data and the external RGB LED both use their full 0–255 range; Companion brightness 0–100 maps to the M5Atom display library's known-safe 0–20/100 range
+- Matrix output is hardware-safeguarded to 20% per RGB channel, making full white `(51,51,51)` with a maximum channel sum of 153; Companion brightness 0–100 also maps to the M5Atom display library's 0–20/100 range
 - Configurable matrix rotation: 0°, 90°, 180° or 270°
 - Atomic PoE Base build with W5500 Ethernet, DHCP, wired setup/REST page and browser firmware updates
 - Codebase aligned with the AtomS3 and AtomS3R versions for consistent behaviour
@@ -43,7 +43,7 @@ USA: https://www.adafruit.com/product/302
 
 Each network variant has two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
 
-The v1.3.12 release provides both network variants:
+The v1.3.13 release provides both network variants:
 
 - `*-wifi-factory.bin` / `*-wifi.ino.bin` — Wi-FiManager, mDNS and external RGB LED.
 - `*-poe-factory.bin` / `*-poe.ino.bin` — Atomic PoE Base, W5500 DHCP and wired setup at `http://<dhcp-ip>:9999/`.
@@ -54,7 +54,7 @@ The PoE build uses G22=SCK, G23=MISO, G33=MOSI and G19=CS. Its DHCP address is p
 
 1. Clone the repository.  
 2. Open `M5-AtomMatrix-Companion-v4-Satellite.ino` in Arduino IDE.
-3. Select the correct board: M5 Atom (ESP32), using **Minimal SPIFFS (Large APPs with OTA)** partition scheme.  
+3. Install the official M5Stack boards package and select **M5Atom** using **Minimal SPIFFS (Large APPs with OTA)**. Release builds use M5Stack core 3.3.8 (`m5stack:esp32:m5stack_atom`); do not use the generic Espressif `esp32:esp32:m5stack-atom` target because its LED driver/toolchain behavior differs.
 4. Install libraries: M5Atom, WiFiManager and M5-Ethernet. Preferences and ArduinoOTA are supplied by the ESP32 board package.
 5. Build normally for Wi-Fi + LED. Define `ATOMIC_POE_BUILD` for the Atomic PoE/W5500 variant.
 6. Upload firmware to the device.
@@ -127,7 +127,7 @@ Cannot connect to Companion: check host IP and port in WiFi portal settings.
 Brightness mismatches: ensure Companion is sending BRIGHTNESS commands.
 
 ## Version
-v1.3.12
+v1.3.13
 
 ## License
 MIT License
