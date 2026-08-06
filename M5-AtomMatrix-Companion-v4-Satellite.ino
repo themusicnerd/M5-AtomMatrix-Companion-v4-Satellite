@@ -78,12 +78,14 @@ const unsigned long pingIntervalMs  = 2000;
 // Brightness (0–100)
 int brightness = 100;
 
-// Companion's 0-100 brightness is mapped to the Atom Matrix controller's
-// conservative 0-20/255 range. RGB colour data and the external tally LED keep
-// their full 0-255 range.
+// LED_DisPlay::setBrightness() accepts 0-100 (not 0-255) and applies its own
+// FastLED scaling internally. Keep the matrix at the library's known-safe 20%
+// ceiling. RGB colour data and the external tally LED keep their full range.
+const uint8_t MATRIX_MAX_BRIGHTNESS_PERCENT = 20;
+
 void applyMatrixBrightness() {
   brightness = constrain(brightness, 0, 100);
-  M5.dis.setBrightness(map(brightness, 0, 100, 0, 20));
+  M5.dis.setBrightness(map(brightness, 0, 100, 0, MATRIX_MAX_BRIGHTNESS_PERCENT));
 }
 
 // 0=0°, 1=90° clockwise, 2=180°, 3=270° clockwise.  This applies to the
@@ -746,7 +748,7 @@ void parseAPI(const String& apiData) {
     brightness = constrain(v.toInt(), 0, 100);
     applyMatrixBrightness();
     Serial.println("[API] BRIGHTNESS set to " + String(brightness) +
-                   " (matrix controller " + String(map(brightness, 0, 100, 0, 20)) + "/255)");
+                   " (M5 brightness " + String(map(brightness, 0, 100, 0, MATRIX_MAX_BRIGHTNESS_PERCENT)) + "/100)");
     return;
   }
 

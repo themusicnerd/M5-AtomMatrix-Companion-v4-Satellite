@@ -12,7 +12,7 @@ A single-button Companion v4 satellite built for the M5 Atom Matrix. Separate Wi
 - Companion API support: KEY-STATE, COLOR, BRIGHTNESS, TEXT, PING, DEVICE-ADD
 - 3×5 pixel text font: short labels are centred and long labels scroll across the 5×5 matrix
 - Colour-only fallback: send an empty text label to use the matrix as a solid tally-colour indicator
-- Matrix colour data and the external RGB LED both use their full 0–255 range; Companion brightness 0–100 maps to the Matrix controller's safe 0–20/255 range
+- Matrix colour data and the external RGB LED both use their full 0–255 range; Companion brightness 0–100 maps to the M5Atom display library's known-safe 0–20/100 range
 - Configurable matrix rotation: 0°, 90°, 180° or 270°
 - Atomic PoE Base build with W5500 Ethernet, DHCP, wired setup/REST page and browser firmware updates
 - Codebase aligned with the AtomS3 and AtomS3R versions for consistent behaviour
@@ -43,7 +43,7 @@ USA: https://www.adafruit.com/product/302
 
 Each network variant has two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
 
-The v1.3.11 release provides both network variants:
+The v1.3.12 release provides both network variants:
 
 - `*-wifi-factory.bin` / `*-wifi.ino.bin` — Wi-FiManager, mDNS and external RGB LED.
 - `*-poe-factory.bin` / `*-poe.ino.bin` — Atomic PoE Base, W5500 DHCP and wired setup at `http://<dhcp-ip>:9999/`.
@@ -62,6 +62,29 @@ The PoE build uses G22=SCK, G23=MISO, G33=MOSI and G19=CS. Its DHCP address is p
 8. In Companion v4: add the device under Surfaces and select the shown deviceID.
 9. Press the button to trigger Companion key events.
 10. Hold the button while powering on or restarting to open the Wi-Fi config portal (SSID equals deviceID).
+
+### Change or reset the Wi-Fi connection
+
+For the Wi-Fi build, restart the Atom Matrix while holding its button. Join the
+`m5atom-matrix_<last-five-MAC-characters>` setup network, browse to
+`http://192.168.4.1/` if the captive portal does not open, choose the replacement
+Wi-Fi network, and save. Saving replaces the stored Wi-Fi credentials. The
+Atomic PoE build uses Ethernet and has no Wi-Fi credentials to reset.
+
+### Companion discovery and one-click setup
+
+The Wi-Fi build advertises `_companion-satellite._tcp`. In Companion, open
+**Surfaces > Remote Surfaces**, find the Atom Matrix, select **+ Setup**, choose
+the address Companion should advertise, and confirm. Companion writes that
+address and Satellite TCP port `16622` to the device's REST API on port `9999`.
+
+The enable/disable switch shown for devices such as Stream Deck Network Dock is
+provided by their Companion surface-integration module and does not apply to
+Satellite API connections. **+ Setup** is the expected claiming flow for this
+firmware. mDNS discovery requires the device and Companion to share a broadcast
+domain, or an mDNS reflector between VLANs. Configure the Companion address
+manually on the port `9999` dashboard when discovery is unavailable. The Atomic
+PoE build currently uses this manual dashboard path.
 
 ## OTA Firmware Update
 OTA updates are enabled.  
@@ -104,7 +127,7 @@ Cannot connect to Companion: check host IP and port in WiFi portal settings.
 Brightness mismatches: ensure Companion is sending BRIGHTNESS commands.
 
 ## Version
-v1.3.11
+v1.3.12
 
 ## License
 MIT License
