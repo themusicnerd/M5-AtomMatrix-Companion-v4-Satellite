@@ -79,14 +79,24 @@ const unsigned long pingIntervalMs  = 2000;
 int brightness = 100;
 
 // LED_DisPlay::setBrightness() accepts 0-100 (not 0-255) and applies its own
-// FastLED scaling internally. Keep the matrix at the library's known-safe 20%
-// ceiling. RGB colour data and the external tally LED keep their full range.
-const uint8_t MATRIX_MAX_BRIGHTNESS_PERCENT = 20;
-const uint8_t MATRIX_OUTPUT_SCALE_PERCENT = 20;
+// FastLED scaling internally. The matrix controller ceiling is 100/100; the
+// separately configurable RGB multiplier provides additional output control.
+const uint8_t MATRIX_MAX_BRIGHTNESS_PERCENT = 100;
+const uint8_t MATRIX_MAX_RGB_SCALE_PERCENT = 100;
+int matrixOutputPercent = 100;
+int matrixRedPercent = 100;
+int matrixGreenPercent = 100;
+int matrixBluePercent = 100;
+
+uint8_t matrixFastLedBrightness() {
+  const int m5Brightness = map(brightness, 0, 100, 0, MATRIX_MAX_BRIGHTNESS_PERCENT);
+  return 40 * m5Brightness / 100;
+}
 
 void applyMatrixBrightness() {
   brightness = constrain(brightness, 0, 100);
   M5.dis.setBrightness(map(brightness, 0, 100, 0, MATRIX_MAX_BRIGHTNESS_PERCENT));
+  FastLED.setBrightness(matrixFastLedBrightness());
 }
 
 // 0=0°, 1=90° clockwise, 2=180°, 3=270° clockwise.  This applies to the
@@ -136,6 +146,9 @@ uint8_t lastColorB = 0;
 enum MatrixStatus { STATUS_BOOT, STATUS_WIFI, STATUS_CONFIG, STATUS_CONNECTED, STATUS_ERROR };
 MatrixStatus matrixStatus = STATUS_BOOT;
 bool tallyActive = false;
+const unsigned long connectedStatusDisplayMs = 30000;
+unsigned long matrixConnectedSince = 0;
+bool matrixConnectedIndicatorHidden = false;
 
 // Companion can supply both COLOR and TEXT with a key state.  The Atom's
 // 5x5 panel is too small for a conventional display font, so text uses a
@@ -378,12 +391,12 @@ void logger(const String& s, const String& type = "info") {
 // Matrix drawing helpers (Tally-Arbiter style)
 // -------------------------------------------------------------------
 int scaleMatrixColor(int rgb) {
-  // Apply the safety limit to the stored LED data as well as the controller
-  // brightness. Full white becomes (51,51,51), so R+G+B never exceeds 153
-  // even if a library/core version ignores or resets global brightness.
-  const uint8_t r = ((rgb >> 16) & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
-  const uint8_t g = ((rgb >> 8)  & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
-  const uint8_t b = (rgb & 0xFF) * MATRIX_OUTPUT_SCALE_PERCENT / 100;
+  // Apply the configured percentage equally to every colour channel. The
+  // separate M5 display brightness remains capped at 100/100. Per-channel
+  // percentages allow white balance adjustment without changing hue globally.
+  const uint8_t r = ((rgb >> 16) & 0xFF) * matrixOutputPercent / 100 * matrixRedPercent / 100;
+  const uint8_t g = ((rgb >> 8)  & 0xFF) * matrixOutputPercent / 100 * matrixGreenPercent / 100;
+  const uint8_t b = (rgb & 0xFF) * matrixOutputPercent / 100 * matrixBluePercent / 100;
   return (r << 16) | (g << 8) | b;
 }
 
@@ -462,13 +475,40 @@ int matrixTextColor() {
   return (r * 299 + g * 587 + b * 114 > 150000) ? RGB_COLOR_BLACK : RGB_COLOR_WARMWHITE;
 }
 
+bool isCompactTeenLabel() {
+  return matrixText.length() == 2 && matrixText[0] == '1' &&
+         matrixText[1] >= '0' && matrixText[1] <= '9';
+}
+
 void renderMatrixText() {
   matrixFill(matrixBackgroundColor);
   if (!matrixText.length()) return;
 
+  const int foreground = matrixTextColor();
+  if (isCompactTeenLabel()) {
+    if (matrixText[1] == '1') {
+      // Give 11 a balanced layout: vertical strokes in human-numbered
+      // columns 2 and 4 (zero-based matrix columns 1 and 3).
+      for (uint8_t y = 0; y < 5; y++) {
+        matrixDrawPixel(y * 5 + 1, foreground);
+        matrixDrawPixel(y * 5 + 3, foreground);
+      }
+      return;
+    }
+    // Fit 10-19 without scrolling: a one-column leading 1, one blank spacer,
+    // then the normal three-column glyph for the second digit.
+    for (uint8_t y = 0; y < 5; y++) {
+      matrixDrawPixel(y * 5, foreground);
+      const uint8_t bits = matrixGlyphRow(matrixText[1], y);
+      for (uint8_t x = 0; x < 3; x++) {
+        if (bits & (4 >> x)) matrixDrawPixel(y * 5 + x + 2, foreground);
+      }
+    }
+    return;
+  }
+
   const int textWidth = matrixText.length() * 4 - 1;
   const int startX = textWidth <= 5 ? (5 - textWidth) / 2 : -matrixTextScroll;
-  const int foreground = matrixTextColor();
   for (uint16_t character = 0; character < matrixText.length(); character++) {
     const int glyphX = startX + character * 4;
     for (uint8_t y = 0; y < 5; y++) {
@@ -482,7 +522,7 @@ void renderMatrixText() {
 }
 
 void updateMatrixTextScroll() {
-  if (!matrixText.length() || matrixText.length() * 4 - 1 <= 5) return;
+  if (!matrixText.length() || isCompactTeenLabel() || matrixText.length() * 4 - 1 <= 5) return;
   const unsigned long now = millis();
   if (now - lastTextScrollTime < textScrollIntervalMs) return;
   lastTextScrollTime = now;
@@ -507,12 +547,34 @@ void renderMatrixStatus() {
     return;
   }
   if (!tallyActive) matrixFill(RGB_COLOR_BLACK);
+  if (matrixStatus == STATUS_CONNECTED && matrixConnectedIndicatorHidden) {
+    if (tallyActive) matrixDrawPixel(0, matrixBackgroundColor);
+    return;
+  }
   matrixDrawPixel(0, matrixStatusColor());
 }
 
 void setMatrixStatus(uint8_t status) {
-  matrixStatus = static_cast<MatrixStatus>(status);
+  const MatrixStatus nextStatus = static_cast<MatrixStatus>(status);
+  if (nextStatus == STATUS_CONNECTED) {
+    if (matrixStatus != STATUS_CONNECTED) {
+      matrixConnectedSince = millis();
+      matrixConnectedIndicatorHidden = false;
+    }
+  } else {
+    matrixConnectedSince = 0;
+    matrixConnectedIndicatorHidden = false;
+  }
+  matrixStatus = nextStatus;
   renderMatrixStatus();
+}
+
+void updateMatrixStatusIndicator() {
+  if (matrixStatus == STATUS_CONNECTED && !matrixConnectedIndicatorHidden &&
+      millis() - matrixConnectedSince >= connectedStatusDisplayMs) {
+    matrixConnectedIndicatorHidden = true;
+    renderMatrixStatus();
+  }
 }
 
 // -------------------------------------------------------------------
@@ -545,7 +607,7 @@ void saveParamCallback() {
 #ifndef ATOMIC_POE_BUILD
 void startConfigPortal() {
   Serial.println("[WiFi] Entering CONFIG PORTAL mode");
-  matrixStatus = STATUS_CONFIG;
+  setMatrixStatus(STATUS_CONFIG);
   
   // Load Companion config from preferences (for default field values)
   preferences.begin("companion", true);
@@ -809,24 +871,41 @@ String jsonSetting(const String& body, const char* name) {
 }
 
 void handleGetSettings() {
-  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + ",\"rotation\":" + String(matrixRotation * 90) + "}");
+  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + ",\"rotation\":" + String(matrixRotation * 90) + ",\"rgbScale\":" + String(matrixOutputPercent) + ",\"redScale\":" + String(matrixRedPercent) + ",\"greenScale\":" + String(matrixGreenPercent) + ",\"blueScale\":" + String(matrixBluePercent) + "}");
 }
 
 void handlePostSettings() {
   const String brightnessValue = jsonSetting(restServer.arg("plain"), "brightness");
   const String rotationValue = jsonSetting(restServer.arg("plain"), "rotation");
+  const String rgbScaleValue = jsonSetting(restServer.arg("plain"), "rgbScale");
+  const String redScaleValue = jsonSetting(restServer.arg("plain"), "redScale");
+  const String greenScaleValue = jsonSetting(restServer.arg("plain"), "greenScale");
+  const String blueScaleValue = jsonSetting(restServer.arg("plain"), "blueScale");
   if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "brightness must be 0-100"); return; }
   if (rotationValue.length() && !(rotationValue == "0" || rotationValue == "90" || rotationValue == "180" || rotationValue == "270")) { restServer.send(400, "text/plain", "rotation must be 0, 90, 180, or 270"); return; }
-  if (!brightnessValue.length() && !rotationValue.length()) { restServer.send(400, "text/plain", "provide brightness and/or rotation"); return; }
+  if (rgbScaleValue.length() && (rgbScaleValue.toInt() < 0 || rgbScaleValue.toInt() > MATRIX_MAX_RGB_SCALE_PERCENT)) { restServer.send(400, "text/plain", "rgbScale must be 0-100"); return; }
+  if (redScaleValue.length() && (redScaleValue.toInt() < 0 || redScaleValue.toInt() > 100)) { restServer.send(400, "text/plain", "redScale must be 0-100"); return; }
+  if (greenScaleValue.length() && (greenScaleValue.toInt() < 0 || greenScaleValue.toInt() > 100)) { restServer.send(400, "text/plain", "greenScale must be 0-100"); return; }
+  if (blueScaleValue.length() && (blueScaleValue.toInt() < 0 || blueScaleValue.toInt() > 100)) { restServer.send(400, "text/plain", "blueScale must be 0-100"); return; }
+  if (!brightnessValue.length() && !rotationValue.length() && !rgbScaleValue.length() && !redScaleValue.length() && !greenScaleValue.length() && !blueScaleValue.length()) { restServer.send(400, "text/plain", "provide brightness, rotation, or an RGB scale"); return; }
   if (brightnessValue.length()) {
     brightness = brightnessValue.toInt();
     applyMatrixBrightness();
   }
   if (rotationValue.length()) matrixRotation = rotationValue.toInt() / 90;
+  if (rgbScaleValue.length()) matrixOutputPercent = rgbScaleValue.toInt();
+  if (redScaleValue.length()) matrixRedPercent = redScaleValue.toInt();
+  if (greenScaleValue.length()) matrixGreenPercent = greenScaleValue.toInt();
+  if (blueScaleValue.length()) matrixBluePercent = blueScaleValue.toInt();
   preferences.begin("companion", false);
   preferences.putInt("brightness", brightness);
   preferences.putInt("rotation", matrixRotation);
+  preferences.putInt("rgbscale", matrixOutputPercent);
+  preferences.putInt("redscale", matrixRedPercent);
+  preferences.putInt("greenscale", matrixGreenPercent);
+  preferences.putInt("bluescale", matrixBluePercent);
   preferences.end();
+  renderMatrixStatus();
   restServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1116,7 +1195,7 @@ void handleStatus() {
 #endif
   json += "\"companionConnected\":" + String(client.connected() ? "true" : "false") + ",";
   json += "\"companion\":\"" + statusJsonEscape(String(companion_host) + ":" + companion_port) + "\",";
-  json += "\"brightness\":" + String(brightness) + ",\"text\":\"" + statusJsonEscape(matrixText) + "\",";
+  json += "\"brightness\":" + String(brightness) + ",\"controllerCap\":" + String(MATRIX_MAX_BRIGHTNESS_PERCENT) + ",\"fastLedBrightness\":" + String(matrixFastLedBrightness()) + ",\"rgbScale\":" + String(matrixOutputPercent) + ",\"redScale\":" + String(matrixRedPercent) + ",\"greenScale\":" + String(matrixGreenPercent) + ",\"blueScale\":" + String(matrixBluePercent) + ",\"statusIndicatorHidden\":" + String(matrixConnectedIndicatorHidden ? "true" : "false") + ",\"text\":\"" + statusJsonEscape(matrixText) + "\",";
   json += "\"color\":{\"r\":" + String(lastColorR) + ",\"g\":" + String(lastColorG) + ",\"b\":" + String(lastColorB) + "},";
   json += "\"uptimeSeconds\":" + String(millis() / 1000) + "}";
   restServer.send(200, "application/json", json);
@@ -1136,9 +1215,17 @@ void handleConfigPage() {
 #endif
     "</p><label>Companion host <input id=h value='" + String(companion_host) +
     "'></label><br><label>Port <input id=p value='" + String(companion_port) +
-    "'></label><br><button onclick=s()>Save</button> <a href=/update>Firmware update</a>"
+    "'></label><br><button onclick=s()>Save Companion</button> <a href=/update>Firmware update</a>"
+    "<hr><label>Matrix RGB scale (%) <input id=m type=number min=0 max=100 value='" + String(matrixOutputPercent) +
+    "'></label><br><label>Red (%) <input id=rs type=number min=0 max=100 value='" + String(matrixRedPercent) +
+    "'></label> <label>Green (%) <input id=gs type=number min=0 max=100 value='" + String(matrixGreenPercent) +
+    "'></label> <label>Blue (%) <input id=bs type=number min=0 max=100 value='" + String(matrixBluePercent) +
+    "'></label><br><button onclick=q()>Save matrix levels</button>"
+    "<p><small>Master and per-channel scales are direct multipliers. LED controller brightness is capped at 100/100 (FastLED 40/255).</small></p>"
     "<pre id=o></pre><script>async function s(){let r=await fetch('/api/config',{method:'POST',"
     "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
+    "o.textContent=await r.text()}async function q(){let r=await fetch('/api/settings',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},body:JSON.stringify({rgbScale:+m.value,redScale:+rs.value,greenScale:+gs.value,blueScale:+bs.value})});"
     "o.textContent=await r.text()}async function u(){try{let x=await(await fetch('/api/status')).json();"
     "state.textContent=(x.networkConnected?'Network connected':'Network disconnected')+' | '+"
     "(x.companionConnected?'Companion connected':'Companion disconnected')+' | '+(x.ip||x.network);"
@@ -1346,6 +1433,14 @@ void setup() {
   brightness = preferences.getInt("brightness", 100);
   matrixRotation = preferences.getInt("rotation", 0);
   if (matrixRotation < 0 || matrixRotation > 3) matrixRotation = 0;
+  matrixOutputPercent = preferences.getInt("rgbscale", MATRIX_MAX_RGB_SCALE_PERCENT);
+  if (matrixOutputPercent < 0 || matrixOutputPercent > MATRIX_MAX_RGB_SCALE_PERCENT) matrixOutputPercent = MATRIX_MAX_RGB_SCALE_PERCENT;
+  matrixRedPercent = preferences.getInt("redscale", 100);
+  matrixGreenPercent = preferences.getInt("greenscale", 100);
+  matrixBluePercent = preferences.getInt("bluescale", 100);
+  if (matrixRedPercent < 0 || matrixRedPercent > 100) matrixRedPercent = 100;
+  if (matrixGreenPercent < 0 || matrixGreenPercent > 100) matrixGreenPercent = 100;
+  if (matrixBluePercent < 0 || matrixBluePercent > 100) matrixBluePercent = 100;
   firmwareUpdatePassword = preferences.getString("updatepassword", "");
   preferences.end();
 
@@ -1431,6 +1526,9 @@ void setup() {
 // LOOP
 // -------------------------------------------------------------------
 void loop() {
+  // LED_DisPlay::run() resets FastLED brightness to 20 after each refresh.
+  // Reapply the configured value continuously so it persists across frames.
+  FastLED.setBrightness(matrixFastLedBrightness());
   M5.update();
 #ifndef ATOMIC_POE_BUILD
   ArduinoOTA.handle();
@@ -1441,6 +1539,7 @@ void loop() {
 
   unsigned long now = millis();
   updateMatrixTextScroll();
+  updateMatrixStatusIndicator();
 
   // Companion connect / reconnect
   if (!client.connected() && (now - lastConnectTry >= connectRetryMs)) {
@@ -1452,7 +1551,7 @@ void loop() {
 
     if (client.connect(companion_host, atoi(companion_port))) {
       Serial.println("[NET] Connected to Companion API");
-      matrixStatus = STATUS_CONNECTED;
+      setMatrixStatus(STATUS_CONNECTED);
       // Good icon when Companion connects
       drawNumberArray(icons[11], readycolor);
       delay(300);
@@ -1461,7 +1560,7 @@ void loop() {
       lastPingTime = millis();
     } else {
       Serial.println("[NET] Companion connect failed");
-      matrixStatus = STATUS_ERROR;
+      setMatrixStatus(STATUS_ERROR);
       drawNumberArray(icons[9], badcolor); // error icon briefly
       delay(200);
       renderMatrixStatus();

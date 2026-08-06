@@ -12,7 +12,7 @@ A single-button Companion v4 satellite built for the M5 Atom Matrix. Separate Wi
 - Companion API support: KEY-STATE, COLOR, BRIGHTNESS, TEXT, PING, DEVICE-ADD
 - 3×5 pixel text font: short labels are centred and long labels scroll across the 5×5 matrix
 - Colour-only fallback: send an empty text label to use the matrix as a solid tally-colour indicator
-- Matrix output is hardware-safeguarded to 20% per RGB channel, making full white `(51,51,51)` with a maximum channel sum of 153; Companion brightness 0–100 also maps to the M5Atom display library's 0–20/100 range
+- Matrix output provides persistent dashboard controls for a 0–100% master RGB scale plus individual red, green and blue scales for white balance; Companion brightness 0–100 separately maps to the M5Atom display library's 0–100/100 controller range (FastLED 0–40/255)
 - Configurable matrix rotation: 0°, 90°, 180° or 270°
 - Atomic PoE Base build with W5500 Ethernet, DHCP, wired setup/REST page and browser firmware updates
 - Codebase aligned with the AtomS3 and AtomS3R versions for consistent behaviour
@@ -43,7 +43,7 @@ USA: https://www.adafruit.com/product/302
 
 Each network variant has two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
 
-The v1.3.13 release provides both network variants:
+The v1.3.14 release provides both network variants:
 
 - `*-wifi-factory.bin` / `*-wifi.ino.bin` — Wi-FiManager, mDNS and external RGB LED.
 - `*-poe-factory.bin` / `*-poe.ino.bin` — Atomic PoE Base, W5500 DHCP and wired setup at `http://<dhcp-ip>:9999/`.
@@ -109,15 +109,17 @@ updates remain available at `http://<device-ip>:9999/update`.
 
 ### 5x5 status indicator
 
-The top-left matrix pixel remains a connection indicator while the rest of the panel shows the Companion tally colour: blue = waiting/connecting, green = connected, orange = Wi-Fi setup, red = error.
+The top-left matrix pixel shows connection state while the rest of the panel shows the Companion tally colour: blue = waiting/connecting, green = connected, orange = Wi-Fi setup, red = error. After 30 seconds of uninterrupted green/connected state, the green pixel returns to the underlying tally colour. All non-green states remain visible until their condition clears; reconnecting restarts the 30-second green timer.
 
 ### Text and colour-only modes
 
 The Atom Matrix now advertises `TEXT=true` to Companion. Text sent with a key state is base64-decoded and rendered using a compact 3×5 font. Labels up to one glyph wide are centred; longer labels scroll continuously. The glyph is drawn in a contrasting colour over the Companion `COLOR` value.
 
+Labels `10` through `19` use a fixed two-digit layout instead of scrolling: the leading `1` is a single vertical column and the second digit uses the normal 3×5 glyph, separated by one blank column. The `11` label uses two balanced vertical strokes in matrix columns 2 and 4.
+
 For background-colour-only mode, set the key text to empty. The panel then returns to the normal solid tally colour (with its connection-status pixel).
 
-Matrix rotation can be set in the Wi-Fi configuration portal or with `POST /api/settings`, for example `{"rotation":90}`. Valid values are 0, 90, 180 and 270. `GET /api/settings` reports the saved rotation alongside brightness.
+Matrix rotation, master RGB scale and individual channel scales can be set on the port `9999` dashboard or with `POST /api/settings`, for example `{"rotation":90,"rgbScale":75,"redScale":100,"greenScale":90,"blueScale":80}`. Rotation accepts 0, 90, 180 or 270, and all scales accept 0–100. `GET /api/settings` reports the saved values alongside brightness. The scales are direct multipliers; the separate M5 display brightness is capped at 100/100 (FastLED 40/255).
 
 ## Troubleshooting
 Matrix LEDs blank: confirm Companion is sending COLOR or BITMAP data.  
@@ -127,7 +129,7 @@ Cannot connect to Companion: check host IP and port in WiFi portal settings.
 Brightness mismatches: ensure Companion is sending BRIGHTNESS commands.
 
 ## Version
-v1.3.13
+v1.3.14
 
 ## License
 MIT License
