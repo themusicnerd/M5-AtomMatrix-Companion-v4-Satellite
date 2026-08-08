@@ -22,6 +22,8 @@
 */
 
 #include <M5Atom.h>
+
+#define FIRMWARE_VERSION "1.3.15"
 #ifdef ATOMIC_POE_BUILD
 #include <SPI.h>
 #include <M5_Ethernet.h>
@@ -77,6 +79,10 @@ const unsigned long pingIntervalMs  = 2000;
 
 // Brightness (0–100)
 int brightness = 100;
+bool ledEnabled = true;
+int ledBrightnessPercent = 100;
+String configuredDeviceName = "";
+String serialProvisionBuffer = "";
 
 // LED_DisPlay::setBrightness() accepts 0-100 (not 0-255) and applies its own
 // FastLED scaling internally. The matrix controller ceiling is 100/100; the
@@ -684,9 +690,9 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
 
   // Atomic PoE owns these four pins, so only Wi-Fi builds drive the LED.
 #ifndef ATOMIC_POE_BUILD
-  writePwm(LED_PIN_RED,   LEDC_CHANNEL_RED,   r);
-  writePwm(LED_PIN_GREEN, LEDC_CHANNEL_GREEN, g);
-  writePwm(LED_PIN_BLUE,  LEDC_CHANNEL_BLUE,  b);
+  writePwm(LED_PIN_RED, LEDC_CHANNEL_RED, ledEnabled ? min(255, int(r) * ledBrightnessPercent / 100) : 0);
+  writePwm(LED_PIN_GREEN, LEDC_CHANNEL_GREEN, ledEnabled ? min(255, int(g) * ledBrightnessPercent / 100) : 0);
+  writePwm(LED_PIN_BLUE, LEDC_CHANNEL_BLUE, ledEnabled ? min(255, int(b) * ledBrightnessPercent / 100) : 0);
 #endif
 
   // Light the matrix in the tally colour, with one status pixel overlaid.
@@ -870,8 +876,36 @@ String jsonSetting(const String& body, const char* name) {
   String value = body.substring(pos, end); value.trim(); return value;
 }
 
+void handleSerialProvisioning() {
+  while (Serial.available()) {
+    const char c = Serial.read();
+    if (c == '\n') {
+      serialProvisionBuffer.trim();
+      if (serialProvisionBuffer.startsWith("PROVISION ")) {
+        const String body = serialProvisionBuffer.substring(10);
+        const String ssid = jsonSetting(body, "ssid"), password = jsonSetting(body, "password");
+        const String host = jsonSetting(body, "companionHost"), port = jsonSetting(body, "companionPort"), name = jsonSetting(body, "deviceName");
+        if (port.length() && (port.toInt() < 1 || port.toInt() > 65535)) {
+          Serial.println("PROVISION-ERROR invalid companionPort");
+        } else {
+          preferences.begin("companion", false);
+          if (host.length()) { host.toCharArray(companion_host, sizeof(companion_host)); preferences.putString("companionip", host); }
+          if (port.length()) { port.toCharArray(companion_port, sizeof(companion_port)); preferences.putString("companionport", port); }
+          if (name.length()) { configuredDeviceName = name.substring(0, 48); preferences.putString("deviceName", configuredDeviceName); }
+          preferences.end();
+          Serial.println("PROVISION-OK");
+#ifndef ATOMIC_POE_BUILD
+          if (ssid.length()) { delay(100); WiFi.persistent(true); WiFi.begin(ssid.c_str(), password.c_str()); }
+#endif
+        }
+      }
+      serialProvisionBuffer = "";
+    } else if (c != '\r' && serialProvisionBuffer.length() < 512) serialProvisionBuffer += c;
+  }
+}
+
 void handleGetSettings() {
-  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + ",\"rotation\":" + String(matrixRotation * 90) + ",\"rgbScale\":" + String(matrixOutputPercent) + ",\"redScale\":" + String(matrixRedPercent) + ",\"greenScale\":" + String(matrixGreenPercent) + ",\"blueScale\":" + String(matrixBluePercent) + "}");
+  restServer.send(200, "application/json", "{\"brightness\":" + String(brightness) + ",\"rotation\":" + String(matrixRotation * 90) + ",\"rgbScale\":" + String(matrixOutputPercent) + ",\"redScale\":" + String(matrixRedPercent) + ",\"greenScale\":" + String(matrixGreenPercent) + ",\"blueScale\":" + String(matrixBluePercent) + ",\"ledEnabled\":" + String(ledEnabled ? "true" : "false") + ",\"ledBrightness\":" + String(ledBrightnessPercent) + "}");
 }
 
 void handlePostSettings() {
@@ -881,13 +915,17 @@ void handlePostSettings() {
   const String redScaleValue = jsonSetting(restServer.arg("plain"), "redScale");
   const String greenScaleValue = jsonSetting(restServer.arg("plain"), "greenScale");
   const String blueScaleValue = jsonSetting(restServer.arg("plain"), "blueScale");
+  const String ledEnabledValue = jsonSetting(restServer.arg("plain"), "ledEnabled");
+  const String ledBrightnessValue = jsonSetting(restServer.arg("plain"), "ledBrightness");
   if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "brightness must be 0-100"); return; }
   if (rotationValue.length() && !(rotationValue == "0" || rotationValue == "90" || rotationValue == "180" || rotationValue == "270")) { restServer.send(400, "text/plain", "rotation must be 0, 90, 180, or 270"); return; }
   if (rgbScaleValue.length() && (rgbScaleValue.toInt() < 0 || rgbScaleValue.toInt() > MATRIX_MAX_RGB_SCALE_PERCENT)) { restServer.send(400, "text/plain", "rgbScale must be 0-100"); return; }
   if (redScaleValue.length() && (redScaleValue.toInt() < 0 || redScaleValue.toInt() > 100)) { restServer.send(400, "text/plain", "redScale must be 0-100"); return; }
   if (greenScaleValue.length() && (greenScaleValue.toInt() < 0 || greenScaleValue.toInt() > 100)) { restServer.send(400, "text/plain", "greenScale must be 0-100"); return; }
   if (blueScaleValue.length() && (blueScaleValue.toInt() < 0 || blueScaleValue.toInt() > 100)) { restServer.send(400, "text/plain", "blueScale must be 0-100"); return; }
-  if (!brightnessValue.length() && !rotationValue.length() && !rgbScaleValue.length() && !redScaleValue.length() && !greenScaleValue.length() && !blueScaleValue.length()) { restServer.send(400, "text/plain", "provide brightness, rotation, or an RGB scale"); return; }
+  if (ledEnabledValue.length() && !(ledEnabledValue == "true" || ledEnabledValue == "false")) { restServer.send(400, "text/plain", "ledEnabled must be true or false"); return; }
+  if (ledBrightnessValue.length() && (ledBrightnessValue.toInt() < 0 || ledBrightnessValue.toInt() > 200)) { restServer.send(400, "text/plain", "ledBrightness must be 0-200"); return; }
+  if (!brightnessValue.length() && !rotationValue.length() && !rgbScaleValue.length() && !redScaleValue.length() && !greenScaleValue.length() && !blueScaleValue.length() && !ledEnabledValue.length() && !ledBrightnessValue.length()) { restServer.send(400, "text/plain", "provide a setting to update"); return; }
   if (brightnessValue.length()) {
     brightness = brightnessValue.toInt();
     applyMatrixBrightness();
@@ -897,6 +935,8 @@ void handlePostSettings() {
   if (redScaleValue.length()) matrixRedPercent = redScaleValue.toInt();
   if (greenScaleValue.length()) matrixGreenPercent = greenScaleValue.toInt();
   if (blueScaleValue.length()) matrixBluePercent = blueScaleValue.toInt();
+  if (ledEnabledValue.length()) ledEnabled = ledEnabledValue == "true";
+  if (ledBrightnessValue.length()) ledBrightnessPercent = ledBrightnessValue.toInt();
   preferences.begin("companion", false);
   preferences.putInt("brightness", brightness);
   preferences.putInt("rotation", matrixRotation);
@@ -904,8 +944,37 @@ void handlePostSettings() {
   preferences.putInt("redscale", matrixRedPercent);
   preferences.putInt("greenscale", matrixGreenPercent);
   preferences.putInt("bluescale", matrixBluePercent);
+  preferences.putBool("ledEnabled", ledEnabled);
+  preferences.putInt("ledBrightness", ledBrightnessPercent);
   preferences.end();
+  setExternalLedColor(lastColorR, lastColorG, lastColorB);
   renderMatrixStatus();
+  restServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handlePostHardwareTest() {
+  const String body = restServer.arg("plain");
+  const String target = jsonSetting(body, "target");
+  const String value = jsonSetting(body, "value");
+  int color = -1;
+  if (value == "red") color = 0xFF0000;
+  else if (value == "green") color = 0x00FF00;
+  else if (value == "blue") color = 0x0000FF;
+  else if (value == "white") color = 0xFFFFFF;
+  else if (value == "off") color = 0x000000;
+  if (target == "led" && color >= 0) {
+    setExternalLedColor((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+  } else if (target == "display" && color >= 0) {
+    matrixText = "";
+    matrixFill(color);
+  } else if (target == "text" && value.length()) {
+    matrixText = value.substring(0, 32);
+    matrixTextScroll = 0;
+    renderMatrixText();
+  } else {
+    restServer.send(400, "text/plain", "Use target led/display with red, green, blue, white, or off; or target text");
+    return;
+  }
   restServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1186,7 +1255,7 @@ String statusJsonEscape(String value) {
 }
 
 void handleStatus() {
-  String json = "{\"deviceName\":\"M5 Atom Matrix\",\"deviceId\":\"" + statusJsonEscape(deviceID) + "\",";
+  String json = "{\"deviceName\":\"" + statusJsonEscape(configuredDeviceName.length() ? configuredDeviceName : "M5 Atom Matrix") + "\",\"deviceId\":\"" + statusJsonEscape(deviceID) + "\",\"firmware\":\"" FIRMWARE_VERSION "\",";
 #ifdef ATOMIC_POE_BUILD
   json += "\"network\":\"ethernet\",\"networkConnected\":" + String(Ethernet.linkStatus() == LinkON ? "true" : "false") + ",";
 #else
@@ -1195,7 +1264,7 @@ void handleStatus() {
 #endif
   json += "\"companionConnected\":" + String(client.connected() ? "true" : "false") + ",";
   json += "\"companion\":\"" + statusJsonEscape(String(companion_host) + ":" + companion_port) + "\",";
-  json += "\"brightness\":" + String(brightness) + ",\"controllerCap\":" + String(MATRIX_MAX_BRIGHTNESS_PERCENT) + ",\"fastLedBrightness\":" + String(matrixFastLedBrightness()) + ",\"rgbScale\":" + String(matrixOutputPercent) + ",\"redScale\":" + String(matrixRedPercent) + ",\"greenScale\":" + String(matrixGreenPercent) + ",\"blueScale\":" + String(matrixBluePercent) + ",\"statusIndicatorHidden\":" + String(matrixConnectedIndicatorHidden ? "true" : "false") + ",\"text\":\"" + statusJsonEscape(matrixText) + "\",";
+  json += "\"brightness\":" + String(brightness) + ",\"controllerCap\":" + String(MATRIX_MAX_BRIGHTNESS_PERCENT) + ",\"fastLedBrightness\":" + String(matrixFastLedBrightness()) + ",\"rgbScale\":" + String(matrixOutputPercent) + ",\"redScale\":" + String(matrixRedPercent) + ",\"greenScale\":" + String(matrixGreenPercent) + ",\"blueScale\":" + String(matrixBluePercent) + ",\"ledEnabled\":" + String(ledEnabled ? "true" : "false") + ",\"ledBrightness\":" + String(ledBrightnessPercent) + ",\"buttonPressed\":" + String(M5.Btn.isPressed() ? "true" : "false") + ",\"statusIndicatorHidden\":" + String(matrixConnectedIndicatorHidden ? "true" : "false") + ",\"text\":\"" + statusJsonEscape(matrixText) + "\",";
   json += "\"color\":{\"r\":" + String(lastColorR) + ",\"g\":" + String(lastColorG) + ",\"b\":" + String(lastColorB) + "},";
   json += "\"uptimeSeconds\":" + String(millis() / 1000) + "}";
   restServer.send(200, "application/json", json);
@@ -1221,15 +1290,20 @@ void handleConfigPage() {
     "'></label> <label>Green (%) <input id=gs type=number min=0 max=100 value='" + String(matrixGreenPercent) +
     "'></label> <label>Blue (%) <input id=bs type=number min=0 max=100 value='" + String(matrixBluePercent) +
     "'></label><br><button onclick=q()>Save matrix levels</button>"
+    "<br><label><input id=le type=checkbox" + String(ledEnabled ? " checked" : "") + "> External RGB LED enabled</label> <label>LED scale <input id=lb type=number min=0 max=200 value='" + String(ledBrightnessPercent) + "'>%</label> <button onclick=e()>Save LED</button>"
+    "<hr><b>Hardware tests</b><p>Button: <strong id=bt>released</strong></p>"
+    "<p>External LED: <button onclick=tt('led','red')>Red</button> <button onclick=tt('led','green')>Green</button> <button onclick=tt('led','blue')>Blue</button> <button onclick=tt('led','white')>White</button> <button onclick=tt('led','off')>Off</button></p>"
+    "<p>5x5 display: <button onclick=tt('display','red')>Red</button> <button onclick=tt('display','green')>Green</button> <button onclick=tt('display','blue')>Blue</button> <button onclick=tt('display','white')>White</button> <button onclick=tt('display','off')>Off</button></p>"
+    "<p><input id=tx placeholder='Matrix test text'><button onclick=tt('text',tx.value)>Show text</button></p>"
     "<p><small>Master and per-channel scales are direct multipliers. LED controller brightness is capped at 100/100 (FastLED 40/255).</small></p>"
     "<pre id=o></pre><script>async function s(){let r=await fetch('/api/config',{method:'POST',"
     "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
     "o.textContent=await r.text()}async function q(){let r=await fetch('/api/settings',{method:'POST',"
     "headers:{'Content-Type':'application/json'},body:JSON.stringify({rgbScale:+m.value,redScale:+rs.value,greenScale:+gs.value,blueScale:+bs.value})});"
-    "o.textContent=await r.text()}async function u(){try{let x=await(await fetch('/api/status')).json();"
+    "o.textContent=await r.text()}async function e(){let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ledEnabled:le.checked,ledBrightness:+lb.value})});o.textContent=await r.text()}async function tt(target,value){let r=await fetch('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,value})});o.textContent=await r.text()}async function u(){try{let x=await(await fetch('/api/status')).json();"
     "state.textContent=(x.networkConnected?'Network connected':'Network disconnected')+' | '+"
     "(x.companionConnected?'Companion connected':'Companion disconnected')+' | '+(x.ip||x.network);"
-    "t.textContent=x.text||'(none)';let q=x.color;c.textContent=`rgb(${q.r}, ${q.g}, ${q.b})`;"
+    "t.textContent=x.text||'(none)';bt.textContent=x.buttonPressed?'PRESSED':'released';let q=x.color;c.textContent=`rgb(${q.r}, ${q.g}, ${q.b})`;"
     "sw.style.background=`rgb(${q.r},${q.g},${q.b})`}catch(e){state.textContent='Status unavailable'}}"
     "u();setInterval(u,2000)</script>";
   restServer.send(200, "text/html", html);
@@ -1247,6 +1321,7 @@ void setupRestServer() {
   restServer.on("/api/port", HTTP_POST, handlePostPort);
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
   restServer.on("/api/settings", HTTP_POST, handlePostSettings);
+  restServer.on("/api/test", HTTP_POST, handlePostHardwareTest);
   restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
   restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
   restServer.on("/update/password", HTTP_POST, handleFirmwareUpdatePassword);
@@ -1301,6 +1376,7 @@ void connectToNetwork() {
   });
 
   // Normal autoConnect behaviour (connect to WiFi, or start portal if no WiFi)
+  wifiManager.setConfigPortalBlocking(false);
   // WiFi connect animation (wifi rings)
   drawNumberArray(icons[3], wificolor);
   delay(300);
@@ -1431,6 +1507,9 @@ void setup() {
   if (preferences.getString("companionport").length() > 0)
     preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
   brightness = preferences.getInt("brightness", 100);
+  ledEnabled = preferences.getBool("ledEnabled", true);
+  ledBrightnessPercent = constrain(preferences.getInt("ledBrightness", 100), 0, 200);
+  configuredDeviceName = preferences.getString("deviceName", "");
   matrixRotation = preferences.getInt("rotation", 0);
   if (matrixRotation < 0 || matrixRotation > 3) matrixRotation = 0;
   matrixOutputPercent = preferences.getInt("rgbscale", MATRIX_MAX_RGB_SCALE_PERCENT);
@@ -1536,6 +1615,10 @@ void loop() {
   Ethernet.maintain();
 #endif
   restServer.handleClient();
+#ifndef ATOMIC_POE_BUILD
+  wifiManager.process();
+#endif
+  handleSerialProvisioning();
 
   unsigned long now = millis();
   updateMatrixTextScroll();
